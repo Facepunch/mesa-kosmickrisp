@@ -919,19 +919,34 @@ kk_flush_pipeline(struct kk_cmd_buffer *cmd)
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
    /* Depth/stencil state may be dynamic, handle it as part of the pipeline. */
-   if (cmd->state.gfx.is_depth_stencil_dynamic &&
-       (IS_DIRTY(DS_DEPTH_TEST_ENABLE) | IS_DIRTY(DS_DEPTH_WRITE_ENABLE) |
-        IS_DIRTY(DS_DEPTH_COMPARE_OP) | IS_DIRTY(DS_STENCIL_TEST_ENABLE) |
-        IS_DIRTY(DS_STENCIL_OP) | IS_DIRTY(DS_STENCIL_COMPARE_MASK) |
-        IS_DIRTY(DS_STENCIL_WRITE_MASK))) {
-      kk_cmd_release_dynamic_ds_state(cmd);
-
+   if (cmd->state.gfx.is_depth_stencil_dynamic) {
       bool has_depth = dyn->rp.attachments & MESA_VK_RP_ATTACHMENT_DEPTH_BIT;
       bool has_stencil =
          dyn->rp.attachments & MESA_VK_RP_ATTACHMENT_STENCIL_BIT;
-      gfx->depth_stencil_state = kk_compile_depth_stencil_state(
-         device, &dyn->ds, has_depth, has_stencil);
-      mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+
+      /* Recompile when a DS dynamic bit is dirty OR when the render pass changed its depth/stencil
+       * attachment presence. The latter is not covered by the DS dirty bits but still changes the
+       * resulting MTLDepthStencilState (has_depth/has_stencil gate depth test/write and stencil test),
+       * and binding a stale depth-enabled state in a depth-less pass aborts under Metal validation. */
+      bool ds_dirty =
+         IS_DIRTY(DS_DEPTH_TEST_ENABLE) | IS_DIRTY(DS_DEPTH_WRITE_ENABLE) |
+         IS_DIRTY(DS_DEPTH_COMPARE_OP) | IS_DIRTY(DS_STENCIL_TEST_ENABLE) |
+         IS_DIRTY(DS_STENCIL_OP) | IS_DIRTY(DS_STENCIL_COMPARE_MASK) |
+         IS_DIRTY(DS_STENCIL_WRITE_MASK);
+      bool attachments_changed = !gfx->ds_compiled_valid ||
+                                 gfx->ds_compiled_has_depth != has_depth ||
+                                 gfx->ds_compiled_has_stencil != has_stencil;
+
+      if (ds_dirty || attachments_changed) {
+         kk_cmd_release_dynamic_ds_state(cmd);
+
+         gfx->depth_stencil_state = kk_compile_depth_stencil_state(
+            device, &dyn->ds, has_depth, has_stencil);
+         gfx->ds_compiled_has_depth = has_depth;
+         gfx->ds_compiled_has_stencil = has_stencil;
+         gfx->ds_compiled_valid = true;
+         mtl_set_depth_stencil_state(enc, gfx->depth_stencil_state);
+      }
    }
 
    if (IS_SHADER_DIRTY(VERTEX)) {

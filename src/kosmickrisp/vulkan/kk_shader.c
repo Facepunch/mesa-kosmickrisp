@@ -1332,15 +1332,26 @@ gather_graphics_pipeline_create_info(
          info->vs.rt_formats[i] = MTL_PIXEL_FORMAT_INVALID;
       }
       for (uint8_t i = 0u; i < state->rp->color_attachment_count; ++i) {
-         uint8_t logical_index = kk_get_logical_color_att_index(state, i);
-         if (logical_index == MESA_VK_ATTACHMENT_UNUSED) {
-            continue;
-         }
          VkFormat format = state->rp->color_attachment_formats[i];
-         info->vs.rt_formats[logical_index] =
-            format == VK_FORMAT_UNDEFINED
-               ? MTL_PIXEL_FORMAT_INVALID
-               : vk_format_to_mtl_pixel_format(format);
+         if (format == VK_FORMAT_UNDEFINED)
+            continue;
+
+         enum mtl_pixel_format mtl_fmt = vk_format_to_mtl_pixel_format(format);
+
+         /* Always stamp the physical attachment index. MTL4 render-pass
+          * attachments are bound at the physical index; leaving rt_formats[i]
+          * as INVALID while the framebuffer is RGBA16Float trips Metal
+          * validation ("pipeline pixelFormat Invalid does not match
+          * framebuffer") and produces black draws without validation.
+          */
+         if (i < MAX_DRAW_BUFFERS)
+            info->vs.rt_formats[i] = mtl_fmt;
+
+         uint8_t logical_index = kk_get_logical_color_att_index(state, i);
+         if (logical_index != MESA_VK_ATTACHMENT_UNUSED &&
+             logical_index < MAX_DRAW_BUFFERS) {
+            info->vs.rt_formats[logical_index] = mtl_fmt;
+         }
       }
       info->vs.d_format =
          has_depth ? vk_format_to_mtl_pixel_format(rp->depth_attachment_format)

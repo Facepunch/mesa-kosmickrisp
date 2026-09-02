@@ -582,8 +582,11 @@ kk_image_plane_finish(struct kk_device *dev, struct kk_image_plane *plane,
                       VkImageCreateFlags create_flags,
                       const VkAllocationCallbacks *pAllocator)
 {
-   if (plane->mtl_handle != NULL)
+   if (plane->mtl_handle != NULL) {
+      if (plane->texture_in_residency_set)
+         kk_device_remove_texture_from_residency_set(dev, plane->mtl_handle);
       mtl_release(plane->mtl_handle);
+   }
    if (plane->mtl_handle_array != NULL)
       mtl_release(plane->mtl_handle_array);
 }

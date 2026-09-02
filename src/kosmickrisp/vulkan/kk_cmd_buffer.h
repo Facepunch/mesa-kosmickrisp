@@ -144,6 +144,14 @@ struct kk_graphics_state {
    mtl_depth_stencil_state *depth_stencil_state;
    mtl_render_pass_descriptor *render_pass_descriptor;
    bool is_depth_stencil_dynamic;
+   /* Render-pass depth/stencil attachment presence the dynamic depth_stencil_state above was last
+    * compiled against. has_depth/has_stencil come from the render pass (dyn->rp.attachments), not from
+    * the depth/stencil dynamic state, so the state must be recompiled when the render pass changes its
+    * depth/stencil attachments even if no DS dynamic bit is dirty. Otherwise a stale depth-enabled state
+    * gets bound in a depth-less pass, which Metal validation aborts on (nil depthAttachment). */
+   bool ds_compiled_has_depth;
+   bool ds_compiled_has_stencil;
+   bool ds_compiled_valid;
    bool is_cull_front_and_back;
    bool need_to_start_render_pass;
 
