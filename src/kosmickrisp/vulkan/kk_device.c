@@ -300,6 +300,9 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (dev->mtl_compiler_handle == NULL)
       goto fail_init;
 
+   simple_mtx_init(&dev->alloc_sets.mutex, mtx_plain);
+   list_inithead(&dev->alloc_sets.free);
+
    /* We need to initialize the device residency set before any bo is created. */
    simple_mtx_init(&dev->residency_set.mutex, mtx_plain);
    dev->residency_set.handle = mtl_new_residency_set(dev->mtl_handle);
@@ -394,6 +397,15 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       dev->has_queue = false;
    }
 
+   /* Sets still owned by an in-flight commit feedback (none after the queue
+    * has been idled, barring a late callback) are not tracked here. */
+   list_for_each_entry_safe(struct kk_alloc_set, set, &dev->alloc_sets.free, link) {
+      for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+         mtl_release(set->allocators[i]);
+      free(set);
+   }
+   simple_mtx_destroy(&dev->alloc_sets.mutex);
+
    /* Release the residency set last once all BOs are released. */
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
@@ -424,6 +436,67 @@ kk_GetDeviceProcAddr(VkDevice _device, const char *pName)
 {
    VK_FROM_HANDLE(kk_device, device, _device);
    return kk_device_get_proc_addr(device, pName);
+}
+
+#define KK_ALLOC_SET_RECYCLE_CMD_BUFS 256
+/* Idle sets beyond this still pin their pools; in-flight sets are unbounded. */
+#define KK_ALLOC_SET_FREE_MAX 4096
+
+struct kk_alloc_set *
+kk_device_acquire_alloc_set(struct kk_device *dev)
+{
+   struct kk_alloc_set *set = NULL;
+   simple_mtx_lock(&dev->alloc_sets.mutex);
+   if (!list_is_empty(&dev->alloc_sets.free)) {
+      set = list_first_entry(&dev->alloc_sets.free, struct kk_alloc_set, link);
+      list_del(&set->link);
+      dev->alloc_sets.free_count--;
+   }
+   simple_mtx_unlock(&dev->alloc_sets.mutex);
+   if (set)
+      return set;
+
+   set = calloc(1, sizeof(*set));
+   if (!set)
+      return NULL;
+   set->dev = dev;
+   for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++) {
+      set->allocators[i] = mtl_new_command_allocator(dev->mtl_handle);
+      if (!set->allocators[i]) {
+         while (i--)
+            mtl_release(set->allocators[i]);
+         free(set);
+         return NULL;
+      }
+   }
+   return set;
+}
+
+void
+kk_device_recycle_alloc_set(struct kk_alloc_set *set)
+{
+   struct kk_device *dev = set->dev;
+   if (set->cmd_bufs_used > KK_ALLOC_SET_RECYCLE_CMD_BUFS) {
+      for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+         mtl_release(set->allocators[i]);
+      free(set);
+      return;
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+      mtl_command_allocator_reset(set->allocators[i]);
+   set->cmd_bufs_used = 0;
+   simple_mtx_lock(&dev->alloc_sets.mutex);
+   unsigned free_count = dev->alloc_sets.free_count;
+   if (free_count < KK_ALLOC_SET_FREE_MAX) {
+      list_add(&set->link, &dev->alloc_sets.free);
+      dev->alloc_sets.free_count++;
+   }
+   simple_mtx_unlock(&dev->alloc_sets.mutex);
+   if (free_count >= KK_ALLOC_SET_FREE_MAX) {
+      for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+         mtl_release(set->allocators[i]);
+      free(set);
+   }
 }
 
 void

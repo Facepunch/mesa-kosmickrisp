@@ -18,6 +18,7 @@
 #include "kosmickrisp/clc/kk_precompiled_shader.h"
 #include "libkk_shaders.h"
 
+#include "util/list.h"
 #include "util/u_dynarray.h"
 
 #include "vk_device.h"
@@ -76,6 +77,23 @@ struct kk_precompiled_cache {
    struct kk_precompiled_shader shaders[LIBKK_NUM_PROGRAMS];
 };
 
+/* Metal 4 command allocators keep a per-allocator pool of IOGPU command
+ * storage sized to the largest recording they ever served and never shrink it.
+ * Owning one per VkCommandBuffer (s&box keeps thousands alive) pinned ~27GB.
+ * Allocators are instead pooled per device and handed to a command buffer only
+ * while it records; the commit feedback returns them once the GPU is done. */
+struct kk_alloc_set {
+   struct list_head link;
+   struct kk_device *dev;
+   /* pre_gfx / gfx / post_gfx. Concurrently open Metal command buffers need
+    * their own allocator (sharing one crashes in AGX endComputePass). */
+   mtl_command_allocator *allocators[3];
+   /* Metal command buffers of the submission that last used the set. */
+   uint32_t cmd_bufs_used;
+   /* KK_GPU_TIME: dispatch grids of the submission, printed with its GPU time. */
+   char dbg_text[768];
+};
+
 struct kk_device {
    struct vk_device vk;
 
@@ -92,6 +110,12 @@ struct kk_device {
    /* Track all heaps the user allocated so we can set them all as resident when
     * recording as required by Metal. */
    struct kk_residency_set residency_set;
+
+   struct {
+      simple_mtx_t mutex;
+      struct list_head free;
+      unsigned free_count;
+   } alloc_sets;
 
    struct kk_precompiled_cache precompiled_cache;
 
@@ -117,6 +141,11 @@ VkResult kk_device_init_meta(struct kk_device *dev);
 void kk_device_finish_meta(struct kk_device *dev);
 VkResult kk_device_init_lib(struct kk_device *dev);
 void kk_device_finish_lib(struct kk_device *dev);
+struct kk_alloc_set *kk_device_acquire_alloc_set(struct kk_device *dev);
+/* GPU must be done with the set. Resets it for reuse or frees it if the last
+ * recording was large enough to have bloated its pools. */
+void kk_device_recycle_alloc_set(struct kk_alloc_set *set);
+
 void kk_device_add_heap_to_residency_set(struct kk_device *dev, mtl_heap *heap);
 void kk_device_remove_heap_from_residency_set(struct kk_device *dev,
                                               mtl_heap *heap);

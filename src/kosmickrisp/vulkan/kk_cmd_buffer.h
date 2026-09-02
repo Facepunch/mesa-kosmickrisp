@@ -225,6 +225,7 @@ struct kk_ts_resolve {
 struct kk_encoder_state {
    /* either a mtl_compute_encoder or a mtl_render_encoder */
    mtl_command_encoder *encoder;
+   /* Borrowed from cmd->alloc_set while recording. */
    mtl_command_allocator *allocator;
    mtl_command_buffer *cmd_buf;
    /* Pending timestamp resolves (struct kk_ts_resolve), flushed at cs_end. */
@@ -258,6 +259,11 @@ struct kk_cmd_buffer {
    struct kk_uploader uploader;
 
    struct util_dynarray submit_cmd_bufs;
+   /* Allocators for the current recording; NULL once handed to a submit. */
+   struct kk_alloc_set *alloc_set;
+   /* KK_GPU_TIME debug: dispatch grids recorded so far. */
+   char dbg_text[768];
+   uint32_t dbg_len;
 
    /* Owned large BOs */
    struct util_dynarray large_bos;

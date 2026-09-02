@@ -89,6 +89,8 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 
    kk_cmd_release_resources(dev, cmd);
+   if (cmd->alloc_set)
+      kk_device_recycle_alloc_set(cmd->alloc_set);
    util_dynarray_fini(&cmd->submit_cmd_bufs);
    util_dynarray_fini(&cmd->large_bos);
 
@@ -96,11 +98,11 @@ kk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 }
 
 static bool
-kk_init_encoder_state(struct kk_encoder_state *es, mtl_device *handle)
+kk_init_encoder_state(struct kk_encoder_state *es, UNUSED mtl_device *handle)
 {
-   es->allocator = mtl_new_command_allocator(handle);
+   es->allocator = NULL; /* borrowed from the alloc set at first encoder use */
    es->ts_resolves = UTIL_DYNARRAY_INIT;
-   return es->allocator != NULL;
+   return true;
 }
 
 static VkResult
@@ -173,12 +175,6 @@ alloc_fail:
    return result;
 }
 
-static void
-kk_reset_encoder_state(struct kk_encoder_state *es)
-{
-   mtl_command_allocator_reset(es->allocator);
-}
-
 void
 kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
 {
@@ -190,12 +186,24 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
    cs_end(cmd);
    kk_cmd_release_resources(dev, cmd);
 
-   kk_reset_encoder_state(cmd->pre_gfx);
-   kk_reset_encoder_state(&cmd->gfx);
-   kk_reset_encoder_state(cmd->post_gfx);
+   /* A set still attached here was never submitted (reset without submit), so
+    * nothing on the GPU references it. Submitted sets are returned by the
+    * commit feedback instead. */
+   if (cmd->alloc_set)
+      kk_device_recycle_alloc_set(cmd->alloc_set);
+   cmd->alloc_set = NULL;
+   cmd->cmp[0].allocator = cmd->gfx.allocator = cmd->cmp[1].allocator = NULL;
 
    cmd->uploader.bo = NULL;
    cmd->uploader.offset = 0;
+   /* A drawable pending present on a command buffer that gets reset was never
+    * presented; give it back to the layer (see kk_encode_drawable_present). */
+   if (cmd->drawable) {
+      mtl_release(cmd->drawable);
+      cmd->drawable = NULL;
+   }
+   cmd->dbg_len = 0;
+   cmd->dbg_text[0] = 0;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
    cmd->uses_heap = false;
@@ -272,9 +280,27 @@ kk_encoder_state_update_debug(struct kk_cmd_buffer *cmd,
       mtl_encoder_push_debug_group(es->encoder, label->pLabelName);
 }
 
+/* Sets are taken at first encoder use, not at reset: the engine resets far
+ * more command buffers per frame than it records into. */
+static void
+kk_cmd_ensure_alloc_set(struct kk_cmd_buffer *cmd)
+{
+   if (cmd->alloc_set)
+      return;
+   cmd->alloc_set = kk_device_acquire_alloc_set(kk_cmd_buffer_device(cmd));
+   if (!cmd->alloc_set) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
+   }
+   cmd->cmp[0].allocator = cmd->alloc_set->allocators[0];
+   cmd->gfx.allocator = cmd->alloc_set->allocators[1];
+   cmd->cmp[1].allocator = cmd->alloc_set->allocators[2];
+}
+
 void
 cs_start_render(struct kk_cmd_buffer *cmd)
 {
+   kk_cmd_ensure_alloc_set(cmd);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    struct kk_graphics_state *state = &cmd->state.gfx;
    uint32_t view_mask = state->render.view_mask;
@@ -343,6 +369,7 @@ kk_start_compute_encoder(struct kk_cmd_buffer *cmd, bool pre_gfx)
 mtl_compute_encoder *
 cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx)
 {
+   kk_cmd_ensure_alloc_set(cmd);
    mtl_compute_encoder *encoder;
    /* If we are not inside a render, we can just take pre_gfx. */
    if (!cmd->gfx.encoder || pre_gfx) {
