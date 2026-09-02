@@ -64,7 +64,7 @@ kk_destroy_encoder_state(struct kk_encoder_state *es)
    assert(es->encoder == NULL);
    assert(es->cmd_buf == NULL);
 
-   mtl_release(es->allocator);
+   /* Borrowed from the command buffer's alloc set, which owns and releases it. */
    es->allocator = NULL;
 
    util_dynarray_fini(&es->ts_resolves);
