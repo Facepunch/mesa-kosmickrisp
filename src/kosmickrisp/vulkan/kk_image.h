@@ -40,6 +40,9 @@ struct kk_image_plane {
    /* Metal handle with 2D array type for 3D images */
    mtl_texture *mtl_handle_array;
    uint64_t addr;
+   /* Swapchain drawable textures are not heap-backed, so they get added to the
+    * device residency set individually and must be removed on release. */
+   bool texture_in_residency_set;
 };
 
 struct kk_image {

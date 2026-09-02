@@ -52,6 +52,8 @@ static VkResult
 kk_bind_drawable_to_vkimage(VkImage vk_image, void *drawable)
 {
    VK_FROM_HANDLE(kk_image, image, vk_image);
+   struct kk_device *dev =
+      container_of(image->vk.base.device, struct kk_device, vk);
    mtl_texture *texture = mtl_drawable_get_texture(drawable);
 
    /* This should only be called for swapchain binding. */
@@ -64,6 +66,13 @@ kk_bind_drawable_to_vkimage(VkImage vk_image, void *drawable)
    plane->mtl_handle = mtl_retain(texture);
    plane->mtl_handle_array = NULL;
    plane->addr = mtl_texture_get_gpu_resource_id(texture);
+   /* Drawable textures are not heap-backed, so they must be made resident
+    * individually. CAMetalLayer rotates the same few drawable textures across
+    * all swapchain images, so never remove the previous texture here — it may
+    * be bound to (or in flight on) another swapchain image. The set stabilizes
+    * at the layer's drawable count; removal happens at plane teardown. */
+   kk_device_add_texture_to_residency_set(dev, texture);
+   plane->texture_in_residency_set = true;
 
    return VK_SUCCESS;
 }

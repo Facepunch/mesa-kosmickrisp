@@ -20,6 +20,10 @@
 static void
 kk_flush_compute_state(struct kk_cmd_buffer *cmd)
 {
+   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+   if (unlikely(cs == NULL || cs->pipeline.cs == NULL))
+      return;
+
    mtl_compute_encoder *encoder = cs_get_compute(cmd);
 
    // Fill Metal argument buffer with descriptor set addresses
@@ -33,8 +37,7 @@ kk_flush_compute_state(struct kk_cmd_buffer *cmd)
    if (desc->root.addr)
       kk_cmd_bind_root_to_argument_table(cmd, desc->root.addr);
 
-   mtl_compute_set_pipeline_state(
-      encoder, cmd->state.shaders[MESA_SHADER_COMPUTE]->pipeline.cs);
+   mtl_compute_set_pipeline_state(encoder, cs->pipeline.cs);
 }
 
 static void
@@ -69,6 +72,16 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
 
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
+   /* No compute shader bound (e.g. meta save/restore of null, or bind skipped).
+    * Metal/KK previously SIGSEGV'd dereferencing cs->info at NULL+0xe8. */
+   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+   if (unlikely(cs == NULL || cs->pipeline.cs == NULL))
+      return;
+
+   struct mtl_size local_size = cs->info.cs.local_size;
+   if (unlikely(local_size.x == 0 || local_size.y == 0 || local_size.z == 0))
+      return;
+
    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
    desc->root_dirty |= desc->root.cs.base_group[0] != baseGroupX;
    desc->root_dirty |= desc->root.cs.base_group[1] != baseGroupY;
@@ -76,9 +89,6 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
    desc->root.cs.base_group[0] = baseGroupX;
    desc->root.cs.base_group[1] = baseGroupY;
    desc->root.cs.base_group[2] = baseGroupZ;
-
-   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
-   struct mtl_size local_size = cs->info.cs.local_size;
 
    mtl_compute_encoder *encoder = cs_get_compute(cmd);
    if (cmd->state.cond_render.enabled) {
@@ -118,6 +128,14 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
+   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
+   if (unlikely(cs == NULL || cs->pipeline.cs == NULL))
+      return;
+
+   struct mtl_size local_size = cs->info.cs.local_size;
+   if (unlikely(local_size.x == 0 || local_size.y == 0 || local_size.z == 0))
+      return;
+
    struct kk_descriptor_state *desc = &cmd->state.cs.descriptors;
    desc->root_dirty |= desc->root.cs.base_group[0] != 0;
    desc->root_dirty |= desc->root.cs.base_group[1] != 0;
@@ -125,9 +143,6 @@ kk_CmdDispatchIndirect2KHR(VkCommandBuffer commandBuffer,
    desc->root.cs.base_group[0] = 0;
    desc->root.cs.base_group[1] = 0;
    desc->root.cs.base_group[2] = 0;
-
-   struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];
-   struct mtl_size local_size = cs->info.cs.local_size;
 
    mtl_compute_encoder *encoder = cs_get_compute(cmd);
    if (cmd->state.cond_render.enabled) {
