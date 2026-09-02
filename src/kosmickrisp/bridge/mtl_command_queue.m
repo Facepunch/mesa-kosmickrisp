@@ -61,8 +61,6 @@ mtl_command_queue_add_residency_set(mtl_command_queue *cmd_queue,
    @autoreleasepool {
       id<MTL4CommandQueue> queue = (id<MTL4CommandQueue>)cmd_queue;
       id<MTLResidencySet> s = (id<MTLResidencySet>)set;
-      if (getenv("KK_RESIDENCY_SPEW"))
-         fprintf(stderr, "[kk-res] attach queue=%p set=%p\n", queue, s);
       return [queue addResidencySet:s];
    }
 }

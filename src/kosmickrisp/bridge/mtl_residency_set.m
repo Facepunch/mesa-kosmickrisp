@@ -36,8 +36,6 @@ mtl_residency_set_add_allocation(mtl_residency_set *residency_set,
       id<MTLResidencySet> set = (id<MTLResidencySet>)residency_set;
       id<MTLAllocation> alloc = (id<MTLAllocation>)allocation;
       [set addAllocation:alloc];
-      if (getenv("KK_RESIDENCY_SPEW"))
-         fprintf(stderr, "[kk-res] add set=%p alloc=%p\n", set, alloc);
    }
 }
 
@@ -58,8 +56,6 @@ mtl_residency_set_commit(mtl_residency_set *residency_set)
    @autoreleasepool {
       id<MTLResidencySet> set = (id<MTLResidencySet>)residency_set;
       [set commit];
-      if (getenv("KK_RESIDENCY_SPEW"))
-         fprintf(stderr, "[kk-res] commit set=%p count=%lu\n", set, (unsigned long)set.allocationCount);
    }
 }
 

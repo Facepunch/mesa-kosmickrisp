@@ -202,8 +202,6 @@ kk_reset_cmd_buffer_internal(struct kk_cmd_buffer *cmd)
       mtl_release(cmd->drawable);
       cmd->drawable = NULL;
    }
-   cmd->dbg_len = 0;
-   cmd->dbg_text[0] = 0;
 
    memset(&cmd->state, 0, sizeof(cmd->state));
    cmd->uses_heap = false;

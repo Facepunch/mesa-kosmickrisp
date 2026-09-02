@@ -5,8 +5,6 @@
  */
 
 #include "kk_sync.h"
-#include <stdio.h>
-#include <stdlib.h>
 
 #include "kk_device.h"
 
@@ -78,15 +76,6 @@ kk_timeline_wait(struct vk_device *device, struct vk_sync *sync,
       timeout_ms =
          (rel_timeout_ns / 1000000) + (rel_timeout_ns % 1000000 ? 1 : 0);
    }
-   static int trace = -1;
-   if (trace < 0)
-      trace = getenv("KK_SUBMIT_TRACE") != NULL;
-   if (trace)
-      fprintf(stderr, "KKTRACE cpu-wait ev=%p val=%llu cur=%llu timeout_ms=%llu\n",
-              (void *)timeline->mtl_handle, (unsigned long long)wait_value,
-              (unsigned long long)mtl_shared_event_get_signaled_value(timeline->mtl_handle),
-              (unsigned long long)timeout_ms);
-
    int completed = mtl_shared_event_wait_until_signaled_value(
       timeline->mtl_handle, wait_value, timeout_ms);
 

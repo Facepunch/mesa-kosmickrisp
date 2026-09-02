@@ -74,14 +74,6 @@ kk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
 
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
-   static int dbg = -1;
-   if (dbg < 0)
-      dbg = getenv("KK_GPU_TIME") != NULL;
-   if (dbg && cmd->dbg_len < sizeof(cmd->dbg_text) - 32)
-      cmd->dbg_len += snprintf(cmd->dbg_text + cmd->dbg_len,
-                               sizeof(cmd->dbg_text) - cmd->dbg_len, "%ux%ux%u ",
-                               groupCountX, groupCountY, groupCountZ);
-
    /* No compute shader bound (e.g. meta save/restore of null, or bind skipped).
     * Metal/KK previously SIGSEGV'd dereferencing cs->info at NULL+0xe8. */
    struct kk_shader *cs = cmd->state.shaders[MESA_SHADER_COMPUTE];

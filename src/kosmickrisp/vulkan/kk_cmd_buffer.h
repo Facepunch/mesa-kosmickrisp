@@ -261,9 +261,6 @@ struct kk_cmd_buffer {
    struct util_dynarray submit_cmd_bufs;
    /* Allocators for the current recording; NULL once handed to a submit. */
    struct kk_alloc_set *alloc_set;
-   /* KK_GPU_TIME debug: dispatch grids recorded so far. */
-   char dbg_text[768];
-   uint32_t dbg_len;
 
    /* Owned large BOs */
    struct util_dynarray large_bos;

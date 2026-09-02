@@ -90,8 +90,6 @@ struct kk_alloc_set {
    mtl_command_allocator *allocators[3];
    /* Metal command buffers of the submission that last used the set. */
    uint32_t cmd_bufs_used;
-   /* KK_GPU_TIME: dispatch grids of the submission, printed with its GPU time. */
-   char dbg_text[768];
 };
 
 struct kk_device {

@@ -6,9 +6,6 @@
  */
 
 #include "kk_queue.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include "kk_buffer.h"
 #include "kk_cmd_buffer.h"
 #include "kk_device.h"
@@ -56,15 +53,10 @@ check_device_lost(struct kk_device *dev, struct mtl_feedback_data *data)
 }
 
 static void
-kk_recycle_alloc_set_from_feedback(struct kk_alloc_set *set,
-                                   struct mtl_feedback_data *data)
+kk_recycle_alloc_set_from_feedback(struct kk_alloc_set *set)
 {
    if (!set)
       return;
-   if (set->dbg_text[0])
-      fprintf(stderr, "KKGPU %.3fms cmdbufs=%u dispatches: %s\n",
-              (data->gpu_end - data->gpu_start) * 1000.0, set->cmd_bufs_used,
-              set->dbg_text);
    /* GPU is done with this commit: its allocators can be reused. */
    kk_device_recycle_alloc_set(set);
 }
@@ -78,10 +70,6 @@ kk_cmd_take_alloc_set(struct kk_cmd_buffer *cmd)
       return NULL;
    set->cmd_bufs_used = util_dynarray_num_elements(&cmd->submit_cmd_bufs,
                                                    mtl_command_buffer *);
-   if (cmd->dbg_len)
-      memcpy(set->dbg_text, cmd->dbg_text, sizeof(set->dbg_text));
-   else
-      set->dbg_text[0] = 0;
    return set;
 }
 
@@ -99,7 +87,7 @@ commit_callback(struct mtl_feedback_data *data)
    struct kk_alloc_set *set = (struct kk_alloc_set *)data->user_data;
    if (set)
       check_device_lost(set->dev, data);
-   kk_recycle_alloc_set_from_feedback(set, data);
+   kk_recycle_alloc_set_from_feedback(set);
 }
 
 static void
@@ -110,7 +98,7 @@ rerecord_commit_callback(struct mtl_feedback_data *data)
    struct kk_device *dev = kk_queue_device(queue);
 
    check_device_lost(dev, data);
-   kk_recycle_alloc_set_from_feedback(commit->alloc_set, data);
+   kk_recycle_alloc_set_from_feedback(commit->alloc_set);
 
    /* Completion callbacks are called from multiple threads, so we need to
     * ensure the access to queue resources is safe. */
@@ -230,15 +218,6 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
    struct kk_queue *queue = container_of(vk_queue, struct kk_queue, vk);
    struct kk_device *dev = kk_queue_device(queue);
 
-   /* KK_SUBMIT_TRACE: log every wait/signal enqueued so a stalled timeline can be
-    * traced back to the submit that should have signaled it. */
-   static int trace = -1;
-   if (trace < 0)
-      trace = getenv("KK_SUBMIT_TRACE") != NULL;
-   static int gpu_time = -1;
-   if (gpu_time < 0)
-      gpu_time = getenv("KK_GPU_TIME") != NULL;
-
    if (vk_queue_is_lost(&queue->vk))
       return VK_ERROR_DEVICE_LOST;
 
@@ -247,11 +226,6 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
         wait != end; ++wait) {
       struct kk_sync_timeline *sync =
          container_of(wait->sync, struct kk_sync_timeline, base);
-      if (trace)
-         fprintf(stderr, "KKTRACE submit q=%p WAIT ev=%p val=%llu (cur=%llu)\n",
-                 (void *)queue, (void *)sync->mtl_handle,
-                 (unsigned long long)wait->wait_value,
-                 (unsigned long long)mtl_shared_event_get_signaled_value(sync->mtl_handle));
       mtl_wait_for_event(queue->mtl_handle, sync->mtl_handle, wait->wait_value);
    }
 
@@ -277,8 +251,6 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
             return result;
       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
          struct kk_alloc_set *set = kk_cmd_take_alloc_set(cmd_buffer);
-         if (set && !cmd_buffer->dbg_len && gpu_time)
-            snprintf(set->dbg_text, sizeof(set->dbg_text), "(none)");
          kk_queue_commit(queue, cmd_buffer, commit_callback, set);
          /* The queue has everything it needs after commit (the command storage
           * lives in the allocators, which are only reset at re-record). Holding
@@ -304,11 +276,6 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
       struct vk_sync_signal *signal = &submit->signals[i];
       struct kk_sync_timeline *sync =
          container_of(signal->sync, struct kk_sync_timeline, base);
-      if (trace)
-         fprintf(stderr, "KKTRACE submit q=%p SIGNAL ev=%p val=%llu cmds=%u\n",
-                 (void *)queue, (void *)sync->mtl_handle,
-                 (unsigned long long)signal->signal_value,
-                 submit->command_buffer_count);
       mtl_signal_event(queue->mtl_handle, sync->mtl_handle,
                        signal->signal_value);
    }
