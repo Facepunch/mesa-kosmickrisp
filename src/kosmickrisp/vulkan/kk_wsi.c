@@ -95,6 +95,14 @@ static void
 kk_encode_drawable_present(VkCommandBuffer vk_cmd, void *drawable)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, vk_cmd);
+   /* WSI re-records this blit command buffer at every acquire. If the app acquires
+    * the image again before its previous present was submitted (s&box queues the
+    * present for its render thread and acquires the next image right away), the
+    * drawable retained here was never presented: release it or the layer's
+    * drawable pool leaks one per frame and every nextDrawable blocks for the full
+    * 1s timeout. */
+   if (cmd->drawable)
+      mtl_release(cmd->drawable);
    mtl_retain(drawable);
    cmd->drawable = drawable;
 }
