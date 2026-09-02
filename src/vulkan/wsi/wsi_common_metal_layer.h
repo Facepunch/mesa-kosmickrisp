@@ -15,6 +15,15 @@
 
 typedef void CAMetalDrawable;
 
+/* VK_MVK_macos_surface: the CAMetalLayer for an NSView. A view whose layer already is a
+ * CAMetalLayer is used as is; otherwise a layer-hosting child view that tracks the view's
+ * size is added and returned in *host_view_out for wsi_metal_layer_release_host_view. */
+CAMetalLayer *
+wsi_metal_layer_for_view(void *ns_view, void **host_view_out);
+
+void
+wsi_metal_layer_release_host_view(void *host_view);
+
 void
 wsi_metal_layer_size(const CAMetalLayer *metal_layer,
    uint32_t *width, uint32_t *height);
