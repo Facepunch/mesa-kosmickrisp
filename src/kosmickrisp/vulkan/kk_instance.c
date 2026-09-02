@@ -60,6 +60,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #endif
 #ifdef VK_USE_PLATFORM_METAL_EXT
    .EXT_metal_surface = true,
+   .MVK_macos_surface = true,
 #endif
 #ifndef VK_USE_PLATFORM_METAL_EXT
    .EXT_headless_surface = true,

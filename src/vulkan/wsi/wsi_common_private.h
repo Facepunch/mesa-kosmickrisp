@@ -353,6 +353,14 @@ wsi_wl_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
                        const VkAllocationCallbacks *pAllocator);
 
 void
+wsi_metal_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
+                          const VkAllocationCallbacks *pAllocator);
+
+void
+wsi_metal_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
+                          const VkAllocationCallbacks *pAllocator);
+
+void
 wsi_win32_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
                           const VkAllocationCallbacks *pAllocator);
 

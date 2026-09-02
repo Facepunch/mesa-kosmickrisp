@@ -5,9 +5,45 @@
  */
 
 #include "wsi_common_metal_layer.h"
+#import <AppKit/AppKit.h>
 
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
+
+CAMetalLayer *
+wsi_metal_layer_for_view(void *ns_view, void **host_view_out)
+{
+   @autoreleasepool {
+      NSView *view = (NSView *)ns_view;
+      *host_view_out = NULL;
+      if (!view)
+         return NULL;
+      if ([view.layer isKindOfClass:[CAMetalLayer class]])
+         return (CAMetalLayer *)view.layer;
+
+      /* Not our view to re-layer (e.g. a Qt widget): host the layer in a child. */
+      NSView *host = [[NSView alloc] initWithFrame:view.bounds];
+      host.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+      CAMetalLayer *layer = [CAMetalLayer layer];
+      layer.contentsScale = view.window ? view.window.backingScaleFactor
+                                        : NSScreen.mainScreen.backingScaleFactor;
+      host.layer = layer;
+      host.wantsLayer = YES;
+      [view addSubview:host];
+      *host_view_out = host;
+      return layer;
+   }
+}
+
+void
+wsi_metal_layer_release_host_view(void *host_view)
+{
+   @autoreleasepool {
+      NSView *host = (NSView *)host_view;
+      [host removeFromSuperview];
+      [host release];
+   }
+}
 
 void
 wsi_metal_layer_size(const CAMetalLayer *metal_layer,

@@ -384,6 +384,12 @@ wsi_DestroySurfaceKHR(VkInstance _instance,
    }
 #endif
 
+#ifdef VK_USE_PLATFORM_METAL_EXT
+   if (surface->platform == VK_ICD_WSI_PLATFORM_METAL) {
+      wsi_metal_surface_destroy(surface, _instance, pAllocator);
+      return;
+   }
+#endif
    vk_free2(&instance->alloc, pAllocator, surface);
 }
 

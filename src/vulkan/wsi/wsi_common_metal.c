@@ -1027,6 +1027,49 @@ wsi_metal_finish_wsi(struct wsi_device *wsi_device,
    vk_free(alloc, wsi);
 }
 
+/* Metal surfaces carry an optional host view (VK_MVK_macos_surface) that must go with them. */
+struct wsi_metal_surface {
+   VkIcdSurfaceMetal base;
+   void *host_view;
+};
+
+VKAPI_ATTR VkResult VKAPI_CALL
+wsi_CreateMacOSSurfaceMVK(VkInstance _instance,
+                          const VkMacOSSurfaceCreateInfoMVK *pCreateInfo,
+                          const VkAllocationCallbacks *pAllocator,
+                          VkSurfaceKHR *pSurface)
+{
+   VK_FROM_HANDLE(vk_instance, instance, _instance);
+   struct wsi_metal_surface *surface;
+
+   surface = vk_zalloc2(&instance->alloc, pAllocator, sizeof *surface, 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (surface == NULL)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   surface->base.base.platform = VK_ICD_WSI_PLATFORM_METAL;
+   surface->base.pLayer =
+      wsi_metal_layer_for_view((void *)pCreateInfo->pView, &surface->host_view);
+   if (surface->base.pLayer == NULL) {
+      vk_free2(&instance->alloc, pAllocator, surface);
+      return VK_ERROR_NATIVE_WINDOW_IN_USE_KHR;
+   }
+
+   *pSurface = VkIcdSurfaceBase_to_handle(&surface->base.base);
+   return VK_SUCCESS;
+}
+
+void
+wsi_metal_surface_destroy(VkIcdSurfaceBase *icd_surface, VkInstance _instance,
+                          const VkAllocationCallbacks *pAllocator)
+{
+   VK_FROM_HANDLE(vk_instance, instance, _instance);
+   struct wsi_metal_surface *surface = (struct wsi_metal_surface *)icd_surface;
+   if (surface->host_view)
+      wsi_metal_layer_release_host_view(surface->host_view);
+   vk_free2(&instance->alloc, pAllocator, surface);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 wsi_CreateMetalSurfaceEXT(
    VkInstance _instance,
@@ -1035,18 +1078,18 @@ wsi_CreateMetalSurfaceEXT(
    VkSurfaceKHR* pSurface)
 {
    VK_FROM_HANDLE(vk_instance, instance, _instance);
-   VkIcdSurfaceMetal *surface;
+   struct wsi_metal_surface *surface;
 
-   surface = vk_alloc2(&instance->alloc, pAllocator, sizeof *surface, 8,
-                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   surface = vk_zalloc2(&instance->alloc, pAllocator, sizeof *surface, 8,
+                        VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (surface == NULL)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
-   surface->base.platform = VK_ICD_WSI_PLATFORM_METAL;
-   surface->pLayer = pCreateInfo->pLayer;
-   assert(surface->pLayer);
+   surface->base.base.platform = VK_ICD_WSI_PLATFORM_METAL;
+   surface->base.pLayer = pCreateInfo->pLayer;
+   assert(surface->base.pLayer);
 
-   *pSurface = VkIcdSurfaceBase_to_handle(&surface->base);
+   *pSurface = VkIcdSurfaceBase_to_handle(&surface->base.base);
    return VK_SUCCESS;
 }
 
