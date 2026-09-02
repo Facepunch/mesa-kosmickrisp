@@ -10,6 +10,16 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 
+/* Only a place for the layer to live: mouse hits must fall through to the app's view. */
+@interface WSIMetalHostView : NSView
+@end
+@implementation WSIMetalHostView
+- (NSView *)hitTest:(NSPoint)point
+{
+   return nil;
+}
+@end
+
 CAMetalLayer *
 wsi_metal_layer_for_view(void *ns_view, void **host_view_out)
 {
@@ -22,7 +32,7 @@ wsi_metal_layer_for_view(void *ns_view, void **host_view_out)
          return (CAMetalLayer *)view.layer;
 
       /* Not our view to re-layer (e.g. a Qt widget): host the layer in a child. */
-      NSView *host = [[NSView alloc] initWithFrame:view.bounds];
+      NSView *host = [[WSIMetalHostView alloc] initWithFrame:view.bounds];
       host.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
       CAMetalLayer *layer = [CAMetalLayer layer];
       layer.contentsScale = view.window ? view.window.backingScaleFactor

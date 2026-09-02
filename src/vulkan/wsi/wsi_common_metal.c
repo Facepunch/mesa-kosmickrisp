@@ -599,6 +599,15 @@ wsi_metal_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
              * we need to re-record the command buffer so it uses the new drawable. */
             wsi_cmd_blit_image_to_image(wsi_chain, &wsi_chain->image_info, &image->base);
          }
+         /* The layer is the only thing that knows the view resized (a widget's
+          * NSView has no window size to poll), so tell the app here, not just at
+          * present: it recreates at the surface's current extent. A collapsed
+          * (0x0) layer is not a resize. */
+         uint32_t width = 0u, height = 0u;
+         wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
+         if (width && height &&
+             (width != chain->extent.width || height != chain->extent.height))
+            return VK_SUBOPTIMAL_KHR;
          return VK_SUCCESS;
       }
 
