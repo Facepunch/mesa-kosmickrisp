@@ -243,3 +243,20 @@ vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
    return kk_GetInstanceProcAddr(instance, pName);
 }
+
+/* The driver doubles as its own loader on macOS: applications (and SDL's
+ * Vulkan support) dlopen it directly and look up the loader entry point. */
+PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+vkGetInstanceProcAddr(VkInstance instance, const char *pName)
+{
+   return kk_GetInstanceProcAddr(instance, pName);
+}
+
+/* No loader, no layers. */
+VKAPI_ATTR VkResult VKAPI_CALL
+kk_EnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
+                                    VkLayerProperties *pProperties)
+{
+   *pPropertyCount = 0;
+   return VK_SUCCESS;
+}

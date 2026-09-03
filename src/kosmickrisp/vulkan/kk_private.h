@@ -34,7 +34,7 @@
 #define KK_SSBO_BOUNDS_CHECK_ALIGNMENT 4
 #define KK_MAX_MULTIVIEW_VIEW_COUNT    32
 #define KK_TEXTURE_BUFFER_WIDTH        (1u << 14)
-#define KK_MAX_OCCLUSION_QUERIES       (32768)
+#define KK_MAX_OCCLUSION_QUERIES       (1u << 20) /* 8 MB of query slots; the engine creates 16K-slot pools per frame in flight */
 #define KK_MIN_SAMPLE_LOCATION         (0.0f)
 #define KK_MAX_SAMPLE_LOCATION         (0.9375f)
 
