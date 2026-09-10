@@ -12,6 +12,27 @@
 #include "kosmickrisp/bridge/mtl_bridge.h"
 
 #include "util/u_memory.h"
+#include "util/u_atomic.h"
+#include <stdlib.h>
+
+/* KK_BO_SPEW=1: alloc/destroy accounting for the BO heap leak hunt. */
+void kk_cmd_pool_spew(void);
+static uint32_t kk_bo_allocs, kk_bo_destroys;
+static void
+kk_bo_spew(const char *what)
+{
+   static int on = -1;
+   if (on < 0)
+      on = getenv("KK_BO_SPEW") != NULL;
+   if (!on)
+      return;
+   uint32_t a = p_atomic_read(&kk_bo_allocs), d = p_atomic_read(&kk_bo_destroys);
+   if (((a + d) & 1023) == 0) {
+      fprintf(stderr, "[kk_bo] %s allocs=%u destroys=%u live=%d\n", what, a, d,
+              (int)(a - d));
+      kk_cmd_pool_spew();
+   }
+}
 
 #if DETECT_OS_APPLE
 #include <mach/mach_init.h>
@@ -67,6 +88,9 @@ kk_alloc_bo(struct kk_device *dev, struct vk_object_base *log_obj,
 
    kk_device_add_heap_to_residency_set(dev, handle);
 
+   p_atomic_inc(&kk_bo_allocs);
+   kk_bo_spew("alloc");
+
    *bo_out = bo;
    return result;
 
@@ -92,6 +116,9 @@ kk_destroy_bo(struct kk_device *dev, struct kk_bo *bo)
 
    if (bo->mtl_handle)
       mtl_release(bo->mtl_handle);
+
+   p_atomic_inc(&kk_bo_destroys);
+   kk_bo_spew("destroy");
 
    FREE(bo);
 }

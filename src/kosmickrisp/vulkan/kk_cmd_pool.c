@@ -11,6 +11,24 @@
 #include "kk_entrypoints.h"
 #include "kk_physical_device.h"
 
+#include "util/u_atomic.h"
+#include <stdlib.h>
+
+/* KK_BO_SPEW=1: command-pool BO accounting for the heap leak hunt. */
+static uint32_t kk_pools_live, kk_pool_free_bos, kk_pool_bos_live;
+void kk_cmd_pool_spew(void);
+void
+kk_cmd_pool_spew(void)
+{
+   static int on = -1;
+   if (on < 0)
+      on = getenv("KK_BO_SPEW") != NULL;
+   if (on)
+      fprintf(stderr, "[kk_pool] pools=%u bos_live=%u in_free_lists=%u\n",
+              p_atomic_read(&kk_pools_live), p_atomic_read(&kk_pool_bos_live),
+              p_atomic_read(&kk_pool_free_bos));
+}
+
 static VkResult
 kk_cmd_bo_create(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
 {
@@ -28,6 +46,7 @@ kk_cmd_bo_create(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
       return vk_error(pool, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
+   p_atomic_inc(&kk_pool_bos_live);
    *bo_out = bo;
    return VK_SUCCESS;
 }
@@ -37,14 +56,17 @@ kk_cmd_bo_destroy(struct kk_cmd_pool *pool, struct kk_cmd_bo *bo)
 {
    struct kk_device *dev = kk_cmd_pool_device(pool);
    kk_destroy_bo(dev, bo->bo);
+   p_atomic_dec(&kk_pool_bos_live);
    vk_free(&pool->vk.alloc, bo);
 }
 
 static void
 kk_cmd_pool_destroy_bos(struct kk_cmd_pool *pool)
 {
-   list_for_each_entry_safe(struct kk_cmd_bo, bo, &pool->free_bos, link)
+   list_for_each_entry_safe(struct kk_cmd_bo, bo, &pool->free_bos, link) {
+      p_atomic_dec(&kk_pool_free_bos);
       kk_cmd_bo_destroy(pool, bo);
+   }
 
    list_inithead(&pool->free_bos);
 }
@@ -56,6 +78,7 @@ kk_cmd_pool_alloc_bo(struct kk_cmd_pool *pool, struct kk_cmd_bo **bo_out)
    if (!list_is_empty(&pool->free_bos)) {
       bo = list_first_entry(&pool->free_bos, struct kk_cmd_bo, link);
       pool->num_free_bos--;
+      p_atomic_dec(&kk_pool_free_bos);
    }
 
    if (bo) {
@@ -77,6 +100,7 @@ kk_cmd_pool_free_bo_list(struct kk_cmd_pool *pool, struct list_head *bos)
       } else {
          list_addtail(&bo->link, &pool->free_bos);
          pool->num_free_bos++;
+         p_atomic_inc(&kk_pool_free_bos);
       }
    }
 }
@@ -103,6 +127,7 @@ kk_CreateCommandPool(VkDevice _device,
    }
 
    list_inithead(&pool->free_bos);
+   p_atomic_inc(&kk_pools_live);
 
    *pCmdPool = kk_cmd_pool_to_handle(pool);
 
@@ -121,6 +146,7 @@ kk_DestroyCommandPool(VkDevice _device, VkCommandPool commandPool,
 
    vk_command_pool_finish(&pool->vk);
    kk_cmd_pool_destroy_bos(pool);
+   p_atomic_dec(&kk_pools_live);
    vk_free2(&device->vk.alloc, pAllocator, pool);
 }
 

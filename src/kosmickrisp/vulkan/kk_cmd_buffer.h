@@ -85,8 +85,15 @@ struct kk_per_draw_data {
    /* Address of tessellation param buffer if tessellation used, else 0 */
    uint64_t tess_params;
 
+   /* Address of geometry param buffer if a geometry shader is used, else 0 */
+   uint64_t geometry_params;
+
    uint64_t base_vertex_addr;
    uint64_t base_instance_addr;
+
+   /* VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT, read by poly's GS lowering. */
+   uint32_t provoking_last;
+   uint32_t pad_;
 };
 
 struct kk_attachment {
@@ -187,6 +194,15 @@ struct kk_graphics_state {
       struct kk_tess_info info;
       enum mesa_prim prim;
    } tess;
+
+   /* Geometry shader rast draw state, filled by kk_upload_geometry_params. */
+   struct {
+      uint64_t index_buffer;
+      uint32_t index_count;
+      uint32_t instance_count;
+      uint32_t index_range;
+      uint8_t index_size_B;
+   } gs;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
    struct vk_vertex_input_state _dynamic_vi;

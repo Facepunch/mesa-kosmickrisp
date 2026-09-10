@@ -13,6 +13,8 @@
 
 #include "kosmickrisp/bridge/mtl_format.h"
 
+#include "poly/nir/poly_nir.h"
+
 #include "vk_pipeline_cache.h"
 
 #include "vk_shader.h"
@@ -45,12 +47,22 @@ kk_tess_info_merge(struct kk_tess_info a, struct kk_tess_info b)
    return out;
 }
 
+enum kk_gs_variant {
+   KK_GS_VARIANT_MAIN = 0,
+   KK_GS_VARIANT_COUNT,
+   KK_GS_VARIANT_PRE,
+   KK_GS_COMPUTE_VARIANTS,
+};
+
 struct kk_shader_info {
    mesa_shader_stage stage;
    bool uses_per_draw_data;
 
    /* Required for fragment shader cull distance discards. */
    uint8_t num_cull_distances;
+
+   /* VS/TES outputs written into the poly vertex output buffer. */
+   uint64_t outputs_written;
 
    union {
       /* Vertex shader is the pipeline, store all relevant data here. */
@@ -106,6 +118,8 @@ struct kk_shader_info {
       struct {
          struct mtl_size local_size;
       } cs;
+
+      struct poly_gs_info gs;
    };
 };
 
@@ -134,6 +148,16 @@ struct kk_shader {
    struct kk_pipeline_handles pipeline;
    struct kk_shader_info info;
    struct msl_compile_data msl_data[MESA_SHADER_STAGES];
+
+   /* Geometry shader compute variants (main / count / pre). The rast
+    * variant is stored as msl_data[MESA_SHADER_GEOMETRY] and used as the
+    * Metal vertex shader.
+    */
+   struct {
+      struct msl_compile_data msl[KK_GS_COMPUTE_VARIANTS];
+      mtl_compute_pipeline_state *pipeline[KK_GS_COMPUTE_VARIANTS];
+      uint32_t local_size[KK_GS_COMPUTE_VARIANTS];
+   } gs;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_shader, vk.base, VkShaderEXT,
