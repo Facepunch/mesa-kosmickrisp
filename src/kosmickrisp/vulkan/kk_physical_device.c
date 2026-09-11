@@ -148,10 +148,15 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
 #ifdef KK_USE_WSI_PLATFORM
-      .KHR_present_id = true,
-      .KHR_present_id2 = true,
-      .KHR_present_wait = true,
-      .KHR_present_wait2 = true,
+      /* Off: Metal only reports a present complete from the drawable's
+       * presented handler, once the frame is on screen, so an app that waits
+       * on its last present every frame (s&box does) is held to the
+       * compositor's round trip - ~31 fps windowed at 120 Hz.
+       */
+      .KHR_present_id = false,
+      .KHR_present_id2 = false,
+      .KHR_present_wait = false,
+      .KHR_present_wait2 = false,
 #endif
       .KHR_robustness2 = true,
       .KHR_shader_fma = true,
@@ -378,16 +383,16 @@ kk_get_device_features(
 
 #ifdef KK_USE_WSI_PLATFORM
       /* VK_KHR_present_id */
-      .presentId = true,
+      .presentId = false,
 
       /* VK_KHR_present_id2 */
-      .presentId2 = true,
+      .presentId2 = false,
 
       /* VK_KHR_present_wait */
-      .presentWait = true,
+      .presentWait = false,
 
       /* VK_KHR_present_wait2 */
-      .presentWait2 = true,
+      .presentWait2 = false,
 #endif
 
       /* VK_KHR_robustness2 */
