@@ -8,6 +8,12 @@
 #include "msl_private.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "util/u_call_once.h"
+
+#include <locale.h>
+#ifdef HAVE_XLOCALE_H
+#include <xlocale.h>
+#endif
 
 static const char *
 get_stage_string(mesa_shader_stage stage)
@@ -2497,9 +2503,39 @@ msl_emit_constant_data(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    P(ctx, "};\n");
 }
 
+/* The MSL text is printed with the C library's printf, so float literals pick
+ * up LC_NUMERIC's decimal separator. A host application that has called
+ * setlocale(LC_ALL, "") on a French (or German, Spanish, ...) system turns
+ * every constant into "float(5,000000000000000e-01)", which Metal's clang
+ * rejects with "excess elements in scalar initializer" - so every pipeline in
+ * the process fails to compile. Emit under the C locale instead. uselocale()
+ * is per-thread, so parallel pipeline compiles don't see each other's switch.
+ *
+ * The locale_t lives for the process; no atexit(freelocale) - a dylib that can
+ * be unloaded must not leave an atexit handler pointing into itself, and it is
+ * one allocation. */
+static locale_t msl_c_locale;
+
+static void
+msl_c_locale_init(void)
+{
+   msl_c_locale = newlocale(LC_NUMERIC_MASK, "C", NULL);
+}
+
+static locale_t
+msl_get_c_locale(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+   util_call_once(&once, msl_c_locale_init);
+   return msl_c_locale;
+}
+
 char *
 nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
 {
+   locale_t c_locale = msl_get_c_locale();
+   locale_t prev_locale = c_locale ? uselocale(c_locale) : (locale_t)0;
+
    /* Need to rename the entrypoint here since hardcoded shaders used by vk_meta
     * don't go through the preprocess step since we are the ones creating them.
     */
@@ -2550,5 +2586,8 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    _mesa_hash_table_destroy(ctx.types, NULL);
    ralloc_steal(options->mem_ctx, ctx.text->buf);
    ralloc_free(ctx.text);
+   if (prev_locale)
+      uselocale(prev_locale);
+
    return ret;
 }
