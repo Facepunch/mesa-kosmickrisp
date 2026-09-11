@@ -454,7 +454,7 @@ kk_device_acquire_alloc_set(struct kk_device *dev)
    }
    simple_mtx_unlock(&dev->alloc_sets.mutex);
    if (set)
-      return set;
+      goto init_residency;
 
    set = calloc(1, sizeof(*set));
    if (!set)
@@ -469,6 +469,14 @@ kk_device_acquire_alloc_set(struct kk_device *dev)
          return NULL;
       }
    }
+init_residency:
+   set->recording_residency = mtl_new_residency_set(dev->mtl_handle);
+   if (!set->recording_residency) {
+      for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+         mtl_release(set->allocators[i]);
+      free(set);
+      return NULL;
+   }
    return set;
 }
 
@@ -476,6 +484,8 @@ void
 kk_device_recycle_alloc_set(struct kk_alloc_set *set)
 {
    struct kk_device *dev = set->dev;
+   mtl_release(set->recording_residency);
+   set->recording_residency = NULL;
    if (set->cmd_bufs_used > KK_ALLOC_SET_RECYCLE_CMD_BUFS) {
       for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
          mtl_release(set->allocators[i]);

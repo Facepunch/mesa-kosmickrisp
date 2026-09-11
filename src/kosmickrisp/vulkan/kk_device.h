@@ -90,6 +90,8 @@ struct kk_alloc_set {
    mtl_command_allocator *allocators[3];
    /* Metal command buffers of the submission that last used the set. */
    uint32_t cmd_bufs_used;
+   /* Immutable after recording; retained through GPU completion. */
+   mtl_residency_set *recording_residency;
 };
 
 struct kk_device {

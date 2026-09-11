@@ -16,7 +16,7 @@ mtl_new_residency_set(mtl_device *device)
       id<MTLDevice> dev = (id<MTLDevice>)device;
       MTLResidencySetDescriptor *setDescriptor = [[[MTLResidencySetDescriptor alloc] init] autorelease];
       setDescriptor.initialCapacity = 100;
-      NSError *error;
+      NSError *error = nil;
       id<MTLResidencySet> set = [dev newResidencySetWithDescriptor:setDescriptor
                                                              error:&error];
 
@@ -74,5 +74,17 @@ mtl_residency_set_end_residency(mtl_residency_set *residency_set)
    @autoreleasepool {
       id<MTLResidencySet> set = (id<MTLResidencySet>)residency_set;
       [set endResidency];
+   }
+}
+
+void
+mtl_residency_set_copy_allocations(mtl_residency_set *dst,
+                                  mtl_residency_set *src)
+{
+   @autoreleasepool {
+      id<MTLResidencySet> d = (id<MTLResidencySet>)dst;
+      id<MTLResidencySet> s = (id<MTLResidencySet>)src;
+      for (id<MTLAllocation> allocation in s.allAllocations)
+         [d addAllocation:allocation];
    }
 }
