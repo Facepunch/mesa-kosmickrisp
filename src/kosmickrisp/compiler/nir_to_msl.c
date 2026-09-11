@@ -1342,6 +1342,14 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       enum gl_access_qualifier access = nir_intrinsic_access(instr);
       const char *type = msl_type_for_def(ctx->types, &instr->def);
       const char *qualifier = global_access_qualifier(ctx, access);
+      /* Preserve proven read-only memory semantics for Metal. Other accesses
+       * still use the device-memory coherency workaround. Keep this limited
+       * to fragment shaders until the other stages have been validated.
+       */
+      if (ctx->shader->info.stage == MESA_SHADER_FRAGMENT &&
+          (access & ACCESS_NON_WRITEABLE) && (access & ACCESS_CAN_REORDER) &&
+          !(access & (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_ATOMIC)))
+         qualifier = "constant";
       if (access & ACCESS_ATOMIC) {
          assert(instr->num_components == 1u &&
                 "We can only do single component with atomics");
@@ -1374,23 +1382,13 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    }
    case nir_intrinsic_load_global_constant_offset: {
-      enum gl_access_qualifier access = nir_intrinsic_access(instr);
-      const char *type = msl_type_for_def(ctx->types, &instr->def);
-      const char *qualifier = global_access_qualifier(ctx, access);
-      if (access & ACCESS_ATOMIC) {
-         assert(instr->num_components == 1u &&
-                "We can only do single component with atomics");
-         P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, type);
-         src_to_msl(ctx, &instr->src[0]);
-         P(ctx, "+");
-         src_to_msl(ctx, &instr->src[1]);
-         P(ctx, ", memory_order_relaxed);\n");
-      } else {
-         src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1],
-                                   qualifier,
-                                   msl_type_for_def(ctx->types, &instr->def),
-                                   instr->def.num_components);
-      }
+      /* Like the other global_constant loads, these access read-only memory.
+       * Preserve the constant address space instead of applying the writable
+       * device-memory coherency workaround to UBO and descriptor reads.
+       */
+      src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
+                                msl_type_for_def(ctx->types, &instr->def),
+                                instr->def.num_components);
       P(ctx, ";\n");
       break;
    }
