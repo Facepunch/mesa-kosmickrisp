@@ -38,3 +38,9 @@ void
 mtl_residency_set_end_residency(mtl_residency_set *residency_set)
 {
 }
+
+void
+mtl_residency_set_copy_allocations(mtl_residency_set *dst,
+                                  mtl_residency_set *src)
+{
+}

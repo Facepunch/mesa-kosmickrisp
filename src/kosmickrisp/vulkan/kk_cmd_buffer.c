@@ -248,6 +248,16 @@ kk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
    cs_end(cmd);
    cs_end(cmd);
+   /* Freeze allocation residency for this recording. The shared device set may
+    * change while the GPU is still executing these commands. */
+   if (cmd->alloc_set) {
+      struct kk_device *dev = kk_cmd_buffer_device(cmd);
+      simple_mtx_lock(&dev->residency_set.mutex);
+      mtl_residency_set_copy_allocations(cmd->alloc_set->recording_residency,
+                                        dev->residency_set.handle);
+      simple_mtx_unlock(&dev->residency_set.mutex);
+      mtl_residency_set_commit(cmd->alloc_set->recording_residency);
+   }
 
    return vk_command_buffer_end(&cmd->vk);
 }
@@ -306,6 +316,8 @@ cs_start_render(struct kk_cmd_buffer *cmd)
 
    cmd->gfx.cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
    mtl_begin_command_buffer(cmd->gfx.cmd_buf, cmd->gfx.allocator);
+   mtl_command_buffer_use_residency_set(cmd->gfx.cmd_buf,
+                                       cmd->alloc_set->recording_residency);
    cmd->gfx.encoder = mtl_new_render_command_encoder_with_descriptor(
       cmd->gfx.cmd_buf, state->render_pass_descriptor);
 
@@ -356,6 +368,8 @@ kk_start_compute_encoder(struct kk_cmd_buffer *cmd, bool pre_gfx)
 
    es->cmd_buf = mtl_new_command_buffer(kk_cmd_buffer_device(cmd)->mtl_handle);
    mtl_begin_command_buffer(es->cmd_buf, es->allocator);
+   mtl_command_buffer_use_residency_set(es->cmd_buf,
+                                       cmd->alloc_set->recording_residency);
    es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
 
    /* Argument table won't ever change */
@@ -725,6 +739,10 @@ kk_cmd_buffer_alloc_bo(struct kk_cmd_buffer *cmd, struct kk_cmd_bo **bo_out)
       return result;
 
    list_addtail(&(*bo_out)->link, &cmd->uploader.bos);
+   mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                    (*bo_out)->bo->mtl_handle);
+   mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                    (*bo_out)->bo->map);
    return VK_SUCCESS;
 }
 
@@ -733,6 +751,10 @@ kk_pool_alloc(struct kk_cmd_buffer *cmd, uint32_t size_B, uint32_t alignment_B)
 {
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    struct kk_uploader *uploader = &cmd->uploader;
+
+   kk_cmd_ensure_alloc_set(cmd);
+   if (!cmd->alloc_set)
+      return (struct kk_ptr){0};
 
    /* Specially handle large allocations owned by the command buffer, e.g. used
     * for statically allocated vertex output buffers with geometry shaders.
@@ -746,6 +768,10 @@ kk_pool_alloc(struct kk_cmd_buffer *cmd, uint32_t size_B, uint32_t alignment_B)
          return (struct kk_ptr){0};
       }
       util_dynarray_append(&cmd->large_bos, buffer);
+      mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                       buffer->mtl_handle);
+      mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                       buffer->map);
 
       return (struct kk_ptr){
          .gpu = buffer->gpu,
