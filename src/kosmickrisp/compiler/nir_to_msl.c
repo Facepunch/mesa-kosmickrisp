@@ -1342,6 +1342,14 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       enum gl_access_qualifier access = nir_intrinsic_access(instr);
       const char *type = msl_type_for_def(ctx->types, &instr->def);
       const char *qualifier = global_access_qualifier(ctx, access);
+      /* Preserve proven read-only memory semantics for Metal. Other accesses
+       * still use the device-memory coherency workaround. Keep this limited
+       * to fragment shaders until the other stages have been validated.
+       */
+      if (ctx->shader->info.stage == MESA_SHADER_FRAGMENT &&
+          (access & ACCESS_NON_WRITEABLE) && (access & ACCESS_CAN_REORDER) &&
+          !(access & (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_ATOMIC)))
+         qualifier = "constant";
       if (access & ACCESS_ATOMIC) {
          assert(instr->num_components == 1u &&
                 "We can only do single component with atomics");
