@@ -976,6 +976,17 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
+
+#ifdef ENABLE_SHADER_CACHE
+   /* Every shader goes SPIR-V -> NIR -> MSL on the CPU before Metal sees it, and that's
+    * the expensive part of building a pipeline. Without a disk cache it happens again in
+    * every process for every pipeline, unless the app brought its own VkPipelineCache
+    * data along. The runtime's pipeline cache falls back to this one on a miss and
+    * stores what it compiled, keyed on the build so a new driver never reads old MSL. */
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, blake3);
+   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
+#endif
 }
 
 static void
@@ -1220,6 +1231,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
    return VK_SUCCESS;
 
 fail_disk_cache:
+   kk_physical_device_free_disk_cache(pdev);
    vk_physical_device_finish(&pdev->vk);
 fail_mtl_dev:
    mtl_release(pdev->mtl_dev_handle);
