@@ -158,12 +158,31 @@ libkk = static_library(
   gnu_symbol_visibility : 'hidden',
 )
 
-# Happens with macOS ld linker:
-# "-Wl,-undefined,dynamic_lookup" required, otherwise, linker will complain about undefined symbols
+# The entrypoint tables reference every possible entrypoint as a weak symbol, and the ones we
+# don't implement have to resolve to NULL. "-Wl,-undefined,dynamic_lookup" lets the link go
+# through, but makes each of those references a flat-namespace bind that dyld resolves by
+# searching every image in the process - several hundred milliseconds of dlopen in a big host.
+# So the same symbols are also offered by a stub library that never exists at run time, linked
+# weakly: a missing weak library resolves its symbols to NULL without searching anything.
+kk_entrypoint_stubs_tbd = custom_target(
+  'kk_entrypoint_stubs.tbd',
+  input : [
+    files('kk_entrypoint_stubs_gen.py'),
+    kk_entrypoints[0], vk_common_entrypoints[0], vk_cmd_enqueue_entrypoints[0], wsi_entrypoints[0],
+  ],
+  output : 'kk_entrypoint_stubs.tbd',
+  command : [prog_python, '@INPUT0@', '--out', '@OUTPUT@', '@INPUT1@', '@INPUT2@', '@INPUT3@', '@INPUT4@'],
+)
+
+# AppKit and CoreGraphics are used directly (NSScreen, NSView, the colour spaces) and were being
+# found through the same flat lookups
 libvulkan_kosmickrisp = shared_library(
   'vulkan_kosmickrisp',
   link_whole: [libkk],
-  link_args: [ld_args_build_id, '-Wl,-undefined,dynamic_lookup'],
+  link_args: [ld_args_build_id, '-Wl,-undefined,dynamic_lookup',
+    '-Wl,-weak_library,' + kk_entrypoint_stubs_tbd.full_path(),
+    '-Wl,-framework,AppKit', '-Wl,-framework,CoreGraphics'],
+  link_depends : kk_entrypoint_stubs_tbd,
   gnu_symbol_visibility : 'hidden',
   install : true,
 )
