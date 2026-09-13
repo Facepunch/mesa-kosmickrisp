@@ -307,6 +307,12 @@ struct wsi_swapchain {
    VkResult (*acquire_next_image)(struct wsi_swapchain *swap_chain,
                                   const VkAcquireNextImageInfoKHR *info,
                                   uint32_t *image_index);
+   /* Optional. Called from vkQueuePresentKHR for each image, after the
+    * per-image throttle fence wait and before the presentation blit is
+    * submitted, so a backend can bind the presentable surface (a
+    * CAMetalDrawable on Metal) as late as possible instead of at acquire. */
+   VkResult (*prepare_present)(struct wsi_swapchain *swap_chain,
+                               uint32_t image_index);
    VkResult (*queue_present)(struct wsi_swapchain *swap_chain,
                              uint32_t image_index,
                              uint64_t present_id,
