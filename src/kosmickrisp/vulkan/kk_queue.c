@@ -141,9 +141,14 @@ kk_queue_commit(struct kk_queue *queue, struct kk_cmd_buffer *cmd,
    mtl_release(options);
 }
 
+/* Replay the enqueued commands of `cmds` into one fresh recording and commit
+ * it. With one source this re-records a resubmitted command buffer (Metal
+ * command buffers are single-shot). With several, the sources are single
+ * render passes on the same attachments and the recording keeps one encoder
+ * across them (kk_cmd_buffer::merge_replay). */
 static VkResult
-rerecord_and_commit_cmd_buffer(struct kk_queue *queue,
-                               struct kk_cmd_buffer *cmd)
+replay_and_commit_cmd_buffers(struct kk_queue *queue,
+                              struct vk_command_buffer **cmds, uint32_t count)
 {
    struct kk_device *dev = kk_queue_device(queue);
    struct vk_command_buffer *vk_cmd = NULL;
@@ -174,9 +179,12 @@ rerecord_and_commit_cmd_buffer(struct kk_queue *queue,
    result = kk_BeginCommandBuffer(rerecord_handle, &begin_info);
    if (result != VK_SUCCESS)
       goto release;
+   rerecord->skip_enqueue = true;
+   rerecord->merge_replay = count > 1;
 
-   vk_cmd_queue_execute(&cmd->vk.cmd_queue, rerecord_handle,
-                        &dev->vk.dispatch_table);
+   for (uint32_t i = 0; i < count; i++)
+      vk_cmd_queue_execute(&cmds[i]->cmd_queue, rerecord_handle,
+                           &dev->vk.dispatch_table);
 
    result = kk_EndCommandBuffer(rerecord_handle);
    if (result != VK_SUCCESS)
@@ -212,6 +220,25 @@ unlock:
    return result;
 }
 
+/* A recording that is exactly one render pass and can join a merge run. */
+static bool
+kk_cmd_buffer_is_mergeable_pass(struct kk_cmd_buffer *cmd)
+{
+   return cmd->pass_count == 1 && !cmd->impure && !cmd->drawable &&
+          kk_cmd_buffer_has_work(cmd);
+}
+
+/* Discard the eager recording of a source that was replayed instead. */
+static void
+kk_cmd_buffer_drop_recording(struct kk_cmd_buffer *cmd)
+{
+   kk_cmd_release_mtl_cmd_bufs(cmd);
+   if (cmd->alloc_set) {
+      kk_device_recycle_alloc_set(cmd->alloc_set);
+      cmd->alloc_set = NULL;
+   }
+}
+
 static VkResult
 kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
 {
@@ -234,7 +261,7 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
     * Otherwise, users are playing with fire. */
    kk_device_make_resources_resident(dev);
 
-   for (uint32_t i = 0; i < submit->command_buffer_count; ++i) {
+   for (uint32_t i = 0; i < submit->command_buffer_count;) {
       struct kk_cmd_buffer *cmd_buffer =
          container_of(submit->command_buffers[i], struct kk_cmd_buffer, vk);
 
@@ -243,10 +270,42 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
                                              cmd_buffer->drawable);
       }
 
+      /* Consecutive single-pass command buffers whose passes continue each
+       * other are replayed into one encoder. */
+      uint32_t run = 1;
+      if (kk_cmd_buffer_is_mergeable_pass(cmd_buffer)) {
+         while (i + run < submit->command_buffer_count) {
+            struct kk_cmd_buffer *next = container_of(
+               submit->command_buffers[i + run], struct kk_cmd_buffer, vk);
+            struct kk_cmd_buffer *prev = container_of(
+               submit->command_buffers[i + run - 1], struct kk_cmd_buffer, vk);
+            if (!kk_cmd_buffer_is_mergeable_pass(next) ||
+                !kk_pass_can_continue(&prev->pass, &next->pass))
+               break;
+            run++;
+         }
+      }
+
+      if (run > 1) {
+         for (uint32_t k = 0; k < run; k++) {
+            struct kk_cmd_buffer *src = container_of(
+               submit->command_buffers[i + k], struct kk_cmd_buffer, vk);
+            kk_cmd_buffer_drop_recording(src);
+            src->submitted = true;
+         }
+         VkResult result = replay_and_commit_cmd_buffers(
+            queue, &submit->command_buffers[i], run);
+         if (result != VK_SUCCESS)
+            return result;
+         i += run;
+         continue;
+      }
+
       /* Metal's command buffers are one time use, re-record multiple
        * submissions. */
       if (cmd_buffer->submitted) {
-         VkResult result = rerecord_and_commit_cmd_buffer(queue, cmd_buffer);
+         VkResult result = replay_and_commit_cmd_buffers(
+            queue, &submit->command_buffers[i], 1);
          if (result != VK_SUCCESS)
             return result;
       } else if (kk_cmd_buffer_has_work(cmd_buffer)) {
@@ -270,6 +329,7 @@ kk_queue_submit(struct vk_queue *vk_queue, struct vk_queue_submit *submit)
          mtl_release(cmd_buffer->drawable);
          cmd_buffer->drawable = NULL;
       }
+      i++;
    }
 
    for (uint32_t i = 0u; i < submit->signal_count; ++i) {

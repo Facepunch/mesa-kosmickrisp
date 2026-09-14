@@ -669,6 +669,26 @@ kk_fs_needs_forced_depth_write(const nir_shader *nir,
                                        indices_known);
 }
 
+/* Only read-only constant loads, at most 16 bytes, never straddling a 16-byte
+ * block (see the call site for why the block matters for bounded loads). */
+static bool
+kk_ubo_vectorize_cb(unsigned align_mul, unsigned align_offset,
+                    unsigned bit_size, unsigned num_components,
+                    int64_t hole_size, nir_intrinsic_instr *low,
+                    nir_intrinsic_instr *high, void *data)
+{
+   if (low->intrinsic != nir_intrinsic_load_global_constant_bounded &&
+       low->intrinsic != nir_intrinsic_load_global_constant)
+      return false;
+
+   const unsigned bytes = bit_size / 8 * num_components;
+   if (bytes > 16)
+      return false;
+   if (align_mul % 16 == 0)
+      return align_offset % 16 + bytes <= 16;
+   return 16 % align_mul == 0 && bytes <= align_mul;
+}
+
 static void
 kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
              const struct vk_pipeline_robustness_state *rs,
@@ -786,6 +806,31 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir, bool emulated_stage,
 
    if (features & KK_FEAT_IMAGE_VIEW_MIN_LOD)
       NIR_PASS(_, nir, kk_nir_lower_image_view_min_lod);
+
+   /* Merge adjacent scalar UBO loads into vector loads. Vectors are kept
+    * inside one 16-byte block, so a robust (bounded) merged load is still
+    * fully covered by the low component's `offset < size` check: UBO
+    * descriptor sizes are multiples of KK_MIN_UBO_ALIGNMENT (64), which is
+    * the robustUniformBufferAccessSizeAlignment we advertise, and buffer
+    * memory is padded to it (kk_GetDeviceBufferMemoryRequirements). */
+   {
+      /* Clean up the address vec4 chains lower_explicit_io left behind so
+       * loads from one descriptor share a base and simple offsets. */
+      bool progress;
+      do {
+         progress = false;
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_dce);
+         NIR_PASS(progress, nir, nir_opt_cse);
+         NIR_PASS(progress, nir, nir_opt_algebraic);
+         NIR_PASS(progress, nir, nir_opt_constant_folding);
+      } while (progress);
+   }
+   NIR_PASS(_, nir, nir_opt_load_store_vectorize,
+            &(const nir_load_store_vectorize_options){
+               .modes = nir_var_mem_global,
+               .callback = kk_ubo_vectorize_cb,
+            });
 
    /* Descriptor lowering needs to happen after lowering blend since we will
     * generate a nir_intrinsic_load_blend_const_color_rgba which gets lowered by

@@ -16,7 +16,7 @@
 struct kk_ts_stage_entry {
    mtl_render_encoder *pass;
    enum mtl_render_stages stage;
-   uint16_t index;
+   uint32_t index;
 };
 
 struct kk_ts_state {
@@ -49,6 +49,6 @@ struct kk_query_pool {
 VK_DEFINE_NONDISP_HANDLE_CASTS(kk_query_pool, vk.base, VkQueryPool,
                                VK_OBJECT_TYPE_QUERY_POOL)
 
-uint16_t *kk_pool_index_ptr(const struct kk_query_pool *pool);
+uint32_t *kk_pool_index_ptr(const struct kk_query_pool *pool);
 
 #endif /* KK_QUERY_POOL_H */

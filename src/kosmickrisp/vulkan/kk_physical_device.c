@@ -148,10 +148,15 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
 #ifdef KK_USE_WSI_PLATFORM
-      .KHR_present_id = true,
-      .KHR_present_id2 = true,
-      .KHR_present_wait = true,
-      .KHR_present_wait2 = true,
+      /* Off: Metal only reports a present complete from the drawable's
+       * presented handler, once the frame is on screen, so an app that waits
+       * on its last present every frame (s&box does) is held to the
+       * compositor's round trip - ~31 fps windowed at 120 Hz.
+       */
+      .KHR_present_id = false,
+      .KHR_present_id2 = false,
+      .KHR_present_wait = false,
+      .KHR_present_wait2 = false,
 #endif
       .KHR_robustness2 = true,
       .KHR_shader_fma = true,
@@ -378,16 +383,16 @@ kk_get_device_features(
 
 #ifdef KK_USE_WSI_PLATFORM
       /* VK_KHR_present_id */
-      .presentId = true,
+      .presentId = false,
 
       /* VK_KHR_present_id2 */
-      .presentId2 = true,
+      .presentId2 = false,
 
       /* VK_KHR_present_wait */
-      .presentWait = true,
+      .presentWait = false,
 
       /* VK_KHR_present_wait2 */
-      .presentWait2 = true,
+      .presentWait2 = false,
 #endif
 
       /* VK_KHR_robustness2 */
@@ -976,6 +981,17 @@ kk_physical_device_init_pipeline_cache(struct kk_physical_device *pdev)
    STATIC_ASSERT(BLAKE3_KEY_LEN >= VK_UUID_SIZE);
    memcpy(pdev->vk.properties.pipelineCacheUUID, blake3, VK_UUID_SIZE);
    memcpy(pdev->vk.properties.shaderBinaryUUID, blake3, VK_UUID_SIZE);
+
+#ifdef ENABLE_SHADER_CACHE
+   /* Every shader goes SPIR-V -> NIR -> MSL on the CPU before Metal sees it, and that's
+    * the expensive part of building a pipeline. Without a disk cache it happens again in
+    * every process for every pipeline, unless the app brought its own VkPipelineCache
+    * data along. The runtime's pipeline cache falls back to this one on a miss and
+    * stores what it compiled, keyed on the build so a new driver never reads old MSL. */
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, blake3);
+   pdev->vk.disk_cache = disk_cache_create("kosmickrisp", timestamp, 0);
+#endif
 }
 
 static void
@@ -1220,6 +1236,7 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
    return VK_SUCCESS;
 
 fail_disk_cache:
+   kk_physical_device_free_disk_cache(pdev);
    vk_physical_device_finish(&pdev->vk);
 fail_mtl_dev:
    mtl_release(pdev->mtl_dev_handle);

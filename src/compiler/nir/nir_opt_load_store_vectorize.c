@@ -99,6 +99,9 @@ get_info(nir_intrinsic_op op)
       INFO(nir_var_mem_global, load_global_transpose_amd, true, -1, 0, -1, -1, 1)
       STORE(nir_var_mem_global, global, -1, 1, -1, 0, 1)
       LOAD(nir_var_mem_global, global_constant, -1, 0, -1, 1)
+      /* base address, offset, bound: two loads merge only with the same bound,
+       * see can_vectorize(). The merged load keeps the low offset's check. */
+      LOAD(nir_var_mem_global, global_constant_bounded, 0, 1, -1, 1)
       LOAD(nir_var_mem_global, global_offset, 0, 1, -1, 1)
       STORE(nir_var_mem_global, global_offset, 1, 2, -1, 0, 1)
       LOAD(nir_var_mem_task_payload, task_payload, -1, 0, -1, 1)
@@ -1508,6 +1511,12 @@ can_vectorize(struct vectorize_ctx *ctx, struct entry *first, struct entry *seco
       if (!nir_srcs_equal(first->intrin->src[3 + store], second->intrin->src[3 + store]))
          return false;
    }
+
+   /* The bounds check of a merged bounded load is the low load's; the two
+    * must have been checked against the same bound. */
+   if (first->intrin->intrinsic == nir_intrinsic_load_global_constant_bounded &&
+       !nir_srcs_equal(first->intrin->src[2], second->intrin->src[2]))
+      return false;
 
    return true;
 }

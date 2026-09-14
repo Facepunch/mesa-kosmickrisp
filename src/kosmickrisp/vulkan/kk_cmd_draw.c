@@ -229,6 +229,81 @@ kk_set_color_attachments(mtl_render_pass_descriptor *pass_descriptor,
    }
 }
 
+static void
+kk_rendering_state_init(struct kk_rendering_state *render,
+                        const VkRenderingInfo *info)
+{
+   memset(render, 0, sizeof(*render));
+   render->flags = info->flags;
+   render->area = info->renderArea;
+   render->view_mask = info->viewMask;
+   render->layer_count = info->layerCount;
+   render->color_att_count = info->colorAttachmentCount;
+   for (uint32_t i = 0; i < render->color_att_count; i++)
+      kk_attachment_init(&render->color_att[i], &info->pColorAttachments[i]);
+   kk_attachment_init(&render->depth_att, info->pDepthAttachment);
+   kk_attachment_init(&render->stencil_att, info->pStencilAttachment);
+}
+
+static bool
+kk_attachment_continues(const struct kk_attachment *prev,
+                        const struct kk_attachment *next)
+{
+   if (prev->iview != next->iview)
+      return false;
+   if (!prev->iview)
+      return true;
+   /* prev's contents must flow into next through tile memory: next loads
+    * (or ignores) them, and nothing else (a resolve) is owed at prev's end. */
+   return prev->resolve_mode == VK_RESOLVE_MODE_NONE &&
+          next->resolve_mode == VK_RESOLVE_MODE_NONE &&
+          (next->load_op == VK_ATTACHMENT_LOAD_OP_LOAD ||
+           next->load_op == VK_ATTACHMENT_LOAD_OP_NONE_KHR);
+}
+
+bool
+kk_pass_can_continue(const struct kk_rendering_state *prev,
+                     const struct kk_rendering_state *next)
+{
+   if (prev->flags || next->flags ||
+       prev->color_att_count != next->color_att_count ||
+       memcmp(&prev->area, &next->area, sizeof(prev->area)) ||
+       prev->layer_count != next->layer_count ||
+       prev->view_mask != next->view_mask)
+      return false;
+   for (uint32_t i = 0; i < prev->color_att_count; i++)
+      if (!kk_attachment_continues(&prev->color_att[i], &next->color_att[i]))
+         return false;
+   return kk_attachment_continues(&prev->depth_att, &next->depth_att) &&
+          kk_attachment_continues(&prev->stencil_att, &next->stencil_att);
+}
+
+/* Continue the suspended encoder with the next pass: only the ops that
+ * matter at the real end (load/store ops, see kk_apply_attachment_store_ops)
+ * are taken from it. */
+static void
+kk_pass_continue(struct kk_cmd_buffer *cmd,
+                 const struct kk_rendering_state *next)
+{
+   struct kk_rendering_state *render = &cmd->state.gfx.render;
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      render->color_att[i].load_op = next->color_att[i].load_op;
+      render->color_att[i].store_op = next->color_att[i].store_op;
+   }
+   render->depth_att.load_op = next->depth_att.load_op;
+   render->depth_att.store_op = next->depth_att.store_op;
+   render->stencil_att.load_op = next->stencil_att.load_op;
+   render->stencil_att.store_op = next->stencil_att.store_op;
+   cmd->pass_suspended = false;
+
+   const VkRenderingAttachmentLocationInfoKHR ral_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_LOCATION_INFO_KHR,
+      .colorAttachmentCount = render->color_att_count,
+   };
+   vk_cmd_set_rendering_attachment_locations(&cmd->vk, &ral_info);
+   kk_cmd_buffer_dirty_render_pass(cmd);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                      const VkRenderingInfo *pRenderingInfo)
@@ -239,14 +314,23 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    struct kk_rendering_state *render = &cmd->state.gfx.render;
 
-   memset(render, 0, sizeof(*render));
+   if (cmd->pass_suspended) {
+      struct kk_rendering_state next;
+      kk_rendering_state_init(&next, pRenderingInfo);
+      if (kk_pass_can_continue(render, &next)) {
+         kk_pass_continue(cmd, &next);
+         return;
+      }
+      kk_end_rendering_now(cmd);
+   }
 
-   render->flags = pRenderingInfo->flags;
-   render->area = pRenderingInfo->renderArea;
-   render->view_mask = pRenderingInfo->viewMask;
-   render->layer_count = pRenderingInfo->layerCount;
-   render->samples = 0;
-   render->color_att_count = pRenderingInfo->colorAttachmentCount;
+   kk_rendering_state_init(render, pRenderingInfo);
+   cmd->pass_count++;
+   if (cmd->pass_count == 1)
+      cmd->pass = *render;
+   if (render->flags &
+       (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_RESUMING_BIT))
+      cmd->impure = true;
 
    const uint32_t layer_count = render->view_mask
                                    ? util_last_bit(render->view_mask)
@@ -255,8 +339,6 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    VkExtent2D framebuffer_extent = {.width = 0u, .height = 0u};
    bool does_any_attachment_clear = false;
    for (uint32_t i = 0; i < render->color_att_count; i++) {
-      kk_attachment_init(&render->color_att[i],
-                         &pRenderingInfo->pColorAttachments[i]);
       kk_merge_render_iview(&framebuffer_extent, render->color_att[i].iview);
       does_any_attachment_clear |=
          (pRenderingInfo->pColorAttachments[i].loadOp ==
@@ -270,8 +352,6 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
          (pRenderingInfo->pStencilAttachment->loadOp ==
           VK_ATTACHMENT_LOAD_OP_CLEAR);
 
-   kk_attachment_init(&render->depth_att, pRenderingInfo->pDepthAttachment);
-   kk_attachment_init(&render->stencil_att, pRenderingInfo->pStencilAttachment);
    kk_merge_render_iview(&framebuffer_extent,
                          render->depth_att.iview ?: render->stencil_att.iview);
 
@@ -490,8 +570,22 @@ kk_CmdEndRendering2KHR(VkCommandBuffer commandBuffer,
                        UNUSED const VkRenderingEndInfoKHR *pRenderingEndInfo)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+
+   /* On a merge replay every pass was checked to have no resolve and no
+    * suspend/resume flags, so the encoder can stay open for the next pass. */
+   if (cmd->merge_replay && cmd->gfx.encoder) {
+      cmd->pass_suspended = true;
+      return;
+   }
+   kk_end_rendering_now(cmd);
+}
+
+void
+kk_end_rendering_now(struct kk_cmd_buffer *cmd)
+{
    struct kk_rendering_state *render = &cmd->state.gfx.render;
    bool need_resolve = false;
+   cmd->pass_suspended = false;
 
    /* Translate render state back to VK for meta */
    VkRenderingAttachmentInfo vk_color_att[KK_MAX_RTS];
@@ -908,6 +1002,7 @@ kk_flush_render_pass(struct kk_cmd_buffer *cmd)
       cs_end(cmd);
       kk_cmd_buffer_dirty_all_gfx(cmd);
       cmd->state.gfx.need_to_start_render_pass = true;
+      cmd->impure = true;
    }
 }
 

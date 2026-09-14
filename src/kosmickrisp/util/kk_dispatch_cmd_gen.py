@@ -84,7 +84,7 @@ ${e.prefixed_name('kk_cmd_tramp')}(${e.decl_params()})
     }
 
     dev->vk.dispatch_table.${e.name}(${e.call_params()});
-    if (!cmd->one_time_submit) {
+    if (!cmd->skip_enqueue) {
       vk_cmd_enqueue_device_entrypoints.${e.name}(${e.call_params()});
     }
     % else:
@@ -96,7 +96,7 @@ ${e.prefixed_name('kk_cmd_tramp')}(${e.decl_params()})
     if (result != VK_SUCCESS)
       return result;
 
-    if (!cmd->one_time_submit) {
+    if (!cmd->skip_enqueue) {
       result = vk_cmd_enqueue_device_entrypoints.${e.name}(${e.call_params()});
     }
     return result;

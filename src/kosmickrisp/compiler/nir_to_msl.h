@@ -9,6 +9,9 @@
 #include "nir.h"
 
 #define MSL_MAX_SAMPLERS 4096
+/* Argument table slots: root at 0, samplers at 1, per-draw data at 2 and the
+ * null-descriptor stand-in texture table (kk_null_textures) at 3. */
+#define MSL_NULL_TEXTURES_BUFFER 3
 
 enum pipe_format;
 struct vk_input_attachment_location_state;
@@ -95,9 +98,13 @@ bool msl_nir_lower_vs_disabled_depth_clamp_clip(nir_shader *nir);
 bool msl_nir_lower_fs_combined_depth_clamp_clip(nir_shader *nir);
 
 bool msl_gather_uses_per_draw_data(nir_shader *nir);
+bool msl_gather_uses_buffer_ptr(nir_shader *nir, unsigned binding);
 
 static const nir_shader_compiler_options kk_nir_options = {
    .lower_fdph = true,
+   /* Robust SSBO loads become load_global_bounded (a select in MSL) instead
+    * of nir_lower_explicit_io's if/phi per component. */
+   .has_load_global_bounded = true,
    .has_fsub = true,
    .has_isub = true,
    .float_mul_add16 = nir_float_muladd_support_has_ffma,

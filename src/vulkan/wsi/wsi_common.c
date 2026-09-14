@@ -2722,6 +2722,12 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          if (results[i] != VK_SUCCESS)
             continue;
 
+         if (swapchain->prepare_present) {
+            results[i] = swapchain->prepare_present(swapchain, image_index);
+            if (results[i] != VK_SUCCESS)
+               continue;
+         }
+
          /* If we're blitting on another swapchain, just signal the blit
           * semaphore for now.
           */

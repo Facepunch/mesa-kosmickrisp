@@ -105,6 +105,7 @@ kk_encode_drawable_present(VkCommandBuffer vk_cmd, void *drawable)
       mtl_release(cmd->drawable);
    mtl_retain(drawable);
    cmd->drawable = drawable;
+   cmd->impure = true;
 }
 
 static void *

@@ -8,6 +8,12 @@
 #include "msl_private.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "util/u_call_once.h"
+
+#include <locale.h>
+#ifdef HAVE_XLOCALE_H
+#include <xlocale.h>
+#endif
 
 static const char *
 get_stage_string(mesa_shader_stage stage)
@@ -106,10 +112,14 @@ emit_inputs(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    P_IND(ctx, "constant SamplerTable &sampler_table [[buffer(1)]]");
    if (ctx->uses_per_draw_data) {
       P(ctx, ",\n");
-      P_IND(ctx, "constant Buffer &per_draw [[buffer(2)]]\n");
-   } else {
-      P(ctx, "\n");
+      P_IND(ctx, "constant Buffer &per_draw [[buffer(2)]]");
    }
+   if (ctx->uses_null_textures) {
+      P(ctx, ",\n");
+      P_IND(ctx, "constant Buffer &buf%d [[buffer(%d)]]",
+            MSL_NULL_TEXTURES_BUFFER, MSL_NULL_TEXTURES_BUFFER);
+   }
+   P(ctx, "\n");
 }
 
 static const char *
@@ -1342,6 +1352,14 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       enum gl_access_qualifier access = nir_intrinsic_access(instr);
       const char *type = msl_type_for_def(ctx->types, &instr->def);
       const char *qualifier = global_access_qualifier(ctx, access);
+      /* Preserve proven read-only memory semantics for Metal. Other accesses
+       * still use the device-memory coherency workaround. Keep this limited
+       * to fragment shaders until the other stages have been validated.
+       */
+      if (ctx->shader->info.stage == MESA_SHADER_FRAGMENT &&
+          (access & ACCESS_NON_WRITEABLE) && (access & ACCESS_CAN_REORDER) &&
+          !(access & (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_ATOMIC)))
+         qualifier = "constant";
       if (access & ACCESS_ATOMIC) {
          assert(instr->num_components == 1u &&
                 "We can only do single component with atomics");
@@ -1355,6 +1373,46 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       }
       break;
    }
+   case nir_intrinsic_load_global_bounded: {
+      /* Robust SSBO load: `(offset + size - 1) < bound ? load : 0` per
+       * component, same predicate nir_lower_explicit_io uses for its if/phi
+       * form, without the control flow. */
+      enum gl_access_qualifier access = nir_intrinsic_access(instr);
+      const char *type = msl_type_for_def(ctx->types, &instr->def);
+      const char *scalar = msl_scalar_type_for_def(ctx->types, &instr->def);
+      const char *qualifier = global_access_qualifier(ctx, access);
+      if (ctx->shader->info.stage == MESA_SHADER_FRAGMENT &&
+          (access & ACCESS_NON_WRITEABLE) && (access & ACCESS_CAN_REORDER) &&
+          !(access & (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_ATOMIC)))
+         qualifier = "constant";
+      const unsigned n = instr->def.num_components;
+      const unsigned sz = instr->def.bit_size / 8;
+      if (n > 1)
+         P(ctx, "%s(", type);
+      for (unsigned i = 0; i < n; i++) {
+         if (i)
+            P(ctx, ", ");
+         P(ctx, "(");
+         src_to_msl(ctx, &instr->src[1]);
+         P(ctx, " + uint(%uu)) < ", i * sz + sz - 1);
+         src_to_msl(ctx, &instr->src[2]);
+         P(ctx, " ? ");
+         if (access & ACCESS_ATOMIC) {
+            P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, scalar);
+         } else {
+            P(ctx, "*(%s %s*)(", qualifier, scalar);
+         }
+         src_to_msl(ctx, &instr->src[0]);
+         P(ctx, " + ");
+         src_to_msl(ctx, &instr->src[1]);
+         if (i)
+            P(ctx, " + uint(%uu)", i * sz);
+         P(ctx, access & ACCESS_ATOMIC ? "), memory_order_relaxed)" : ")");
+         P(ctx, " : %s(0)", scalar);
+      }
+      P(ctx, n > 1 ? ");\n" : ";\n");
+      break;
+   }
    case nir_intrinsic_load_global_constant: {
       src_to_packed_load(ctx, &instr->src[0], "constant",
                          msl_type_for_def(ctx->types, &instr->def),
@@ -1363,34 +1421,24 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    }
    case nir_intrinsic_load_global_constant_bounded: {
+      const char *type = msl_type_for_def(ctx->types, &instr->def);
       src_to_msl(ctx, &instr->src[1]);
       P(ctx, " < ");
       src_to_msl(ctx, &instr->src[2]);
       P(ctx, " ? ");
       src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
-                                msl_type_for_def(ctx->types, &instr->def),
-                                instr->def.num_components);
-      P(ctx, " : 0;\n");
+                                type, instr->def.num_components);
+      P(ctx, " : %s(0);\n", type);
       break;
    }
    case nir_intrinsic_load_global_constant_offset: {
-      enum gl_access_qualifier access = nir_intrinsic_access(instr);
-      const char *type = msl_type_for_def(ctx->types, &instr->def);
-      const char *qualifier = global_access_qualifier(ctx, access);
-      if (access & ACCESS_ATOMIC) {
-         assert(instr->num_components == 1u &&
-                "We can only do single component with atomics");
-         P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, type);
-         src_to_msl(ctx, &instr->src[0]);
-         P(ctx, "+");
-         src_to_msl(ctx, &instr->src[1]);
-         P(ctx, ", memory_order_relaxed);\n");
-      } else {
-         src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1],
-                                   qualifier,
-                                   msl_type_for_def(ctx->types, &instr->def),
-                                   instr->def.num_components);
-      }
+      /* Like the other global_constant loads, these access read-only memory.
+       * Preserve the constant address space instead of applying the writable
+       * device-memory coherency workaround to UBO and descriptor reads.
+       */
+      src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
+                                msl_type_for_def(ctx->types, &instr->def),
+                                instr->def.num_components);
       P(ctx, ";\n");
       break;
    }
@@ -1541,26 +1589,43 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       src_to_msl(ctx, &instr->src[0]);
       P(ctx, ");\n");
       break;
-   case nir_intrinsic_load_scratch:
-      P(ctx, "*(thread %s*)&scratch[",
-        msl_type_for_def(ctx->types, &instr->def));
+   case nir_intrinsic_load_scratch: {
+      const char *type = msl_type_for_def(ctx->types, &instr->def);
+      bool vector = instr->def.num_components > 1;
+      if (vector)
+         P(ctx, "%s(", type);
+      P(ctx, "*(thread %s%s*)&scratch[", vector ? "packed_" : "", type);
       src_to_msl(ctx, &instr->src[0]);
-      P(ctx, "];\n");
+      P(ctx, vector ? "]);\n" : "];\n");
       break;
-   case nir_intrinsic_store_scratch:
-      P_IND(ctx, "(*(thread %s*)&scratch[",
-            msl_type_for_src(ctx->types, &instr->src[0]));
-      src_to_msl(ctx, &instr->src[1]);
-      P(ctx, "])");
-      writemask_to_msl(ctx, nir_intrinsic_write_mask(instr),
-                       instr->num_components);
-      P(ctx, " = ");
-      src_to_msl(ctx, &instr->src[0]);
-      if (instr->src[0].ssa->num_components > 1)
-         writemask_to_msl(ctx, nir_intrinsic_write_mask(instr),
-                          instr->num_components);
-      P(ctx, ";\n");
+   }
+   case nir_intrinsic_store_scratch: {
+      const char *type = msl_type_for_src(ctx->types, &instr->src[0]);
+      unsigned components = instr->num_components;
+      unsigned mask = nir_intrinsic_write_mask(instr);
+      bool vector = components > 1;
+      /* Scratch has scalar alignment, including 12-byte vec3 array strides.
+       * Packed vectors preserve that layout. Partial stores use components
+       * individually because packed vectors do not support vector swizzles. */
+      bool full = mask == BITFIELD_MASK(components);
+      unsigned stores = full ? 1 : components;
+      for (unsigned i = 0; i < stores; i++) {
+         if (!full && !(mask & BITFIELD_BIT(i)))
+            continue;
+         P_IND(ctx, "(*(thread %s%s*)&scratch[",
+               vector ? "packed_" : "", type);
+         src_to_msl(ctx, &instr->src[1]);
+         P(ctx, "])");
+         if (!full)
+            P(ctx, ".%c", "xyzw"[i]);
+         P(ctx, " = ");
+         src_to_msl(ctx, &instr->src[0]);
+         if (!full)
+            P(ctx, ".%c", "xyzw"[i]);
+         P(ctx, ";\n");
+      }
       break;
+   }
    case nir_intrinsic_load_texture_handle_kk:
    case nir_intrinsic_load_depth_texture_kk:
       P(ctx, "*(constant ");
@@ -2384,6 +2449,8 @@ msl_gather_info(struct nir_to_msl_ctx *ctx, struct nir_to_msl_options *options)
    nir_function_impl *impl = nir_shader_get_entrypoint(ctx->shader);
    ctx->types = msl_infer_types(ctx->shader);
    ctx->uses_per_draw_data = msl_gather_uses_per_draw_data(ctx->shader);
+   ctx->uses_null_textures =
+      msl_gather_uses_buffer_ptr(ctx->shader, MSL_NULL_TEXTURES_BUFFER);
 
    /* TODO_KOSMICKRISP
     * Reindex blocks and ssa. This allows us to optimize things we don't at the
@@ -2497,9 +2564,39 @@ msl_emit_constant_data(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    P(ctx, "};\n");
 }
 
+/* The MSL text is printed with the C library's printf, so float literals pick
+ * up LC_NUMERIC's decimal separator. A host application that has called
+ * setlocale(LC_ALL, "") on a French (or German, Spanish, ...) system turns
+ * every constant into "float(5,000000000000000e-01)", which Metal's clang
+ * rejects with "excess elements in scalar initializer" - so every pipeline in
+ * the process fails to compile. Emit under the C locale instead. uselocale()
+ * is per-thread, so parallel pipeline compiles don't see each other's switch.
+ *
+ * The locale_t lives for the process; no atexit(freelocale) - a dylib that can
+ * be unloaded must not leave an atexit handler pointing into itself, and it is
+ * one allocation. */
+static locale_t msl_c_locale;
+
+static void
+msl_c_locale_init(void)
+{
+   msl_c_locale = newlocale(LC_NUMERIC_MASK, "C", NULL);
+}
+
+static locale_t
+msl_get_c_locale(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+   util_call_once(&once, msl_c_locale_init);
+   return msl_c_locale;
+}
+
 char *
 nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
 {
+   locale_t c_locale = msl_get_c_locale();
+   locale_t prev_locale = c_locale ? uselocale(c_locale) : (locale_t)0;
+
    /* Need to rename the entrypoint here since hardcoded shaders used by vk_meta
     * don't go through the preprocess step since we are the ones creating them.
     */
@@ -2550,5 +2647,8 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    _mesa_hash_table_destroy(ctx.types, NULL);
    ralloc_steal(options->mem_ctx, ctx.text->buf);
    ralloc_free(ctx.text);
+   if (prev_locale)
+      uselocale(prev_locale);
+
    return ret;
 }

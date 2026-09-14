@@ -79,8 +79,10 @@ kk_GetDeviceBufferMemoryRequirements(
       pdev, pInfo->pCreateInfo->size, pInfo->pCreateInfo->usage,
       pInfo->pCreateInfo->flags);
 
+   /* Padded to the UBO bounds-check granularity, see kk_buffer_desc_size(). */
    pMemoryRequirements->memoryRequirements = (VkMemoryRequirements){
-      .size = align64(pInfo->pCreateInfo->size, alignment),
+      .size = align64(pInfo->pCreateInfo->size,
+                      MAX2(alignment, KK_MIN_UBO_ALIGNMENT)),
       .alignment = alignment,
       .memoryTypeBits = BITFIELD_MASK(pdev->mem_type_count),
    };

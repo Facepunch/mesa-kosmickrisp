@@ -17,6 +17,7 @@
 #include "kosmickrisp/bridge/mtl_device.h"
 #include "kosmickrisp/bridge/mtl_encoder.h"
 #include "kosmickrisp/bridge/vk_to_mtl_map.h"
+#include "kosmickrisp/compiler/nir_to_msl.h"
 
 #include "vk_alloc.h"
 #include "vk_common_entrypoints.h"
@@ -143,11 +144,13 @@ kk_create_cmd_buffer(struct vk_command_pool *vk_pool,
 
    {
       mtl_argument_table_descriptor *desc = mtl_new_argument_table_descriptor();
-      /* Root at 0, samplers at 1 and per draw data at 2 */
-      mtl_set_max_buffer_binding_count(desc, 3u);
+      /* Root at 0, samplers at 1, per draw data at 2, null stand-in textures
+       * at MSL_NULL_TEXTURES_BUFFER */
+      mtl_set_max_buffer_binding_count(desc, MSL_NULL_TEXTURES_BUFFER + 1);
       cmd->argument_table = mtl_new_argument_table(dev->mtl_handle, desc);
       mtl_set_address(cmd->argument_table, dev->samplers.table.bo->gpu, 1u);
-      mtl_release(desc);
+      mtl_set_address(cmd->argument_table, dev->null_textures.bo->gpu,
+                      MSL_NULL_TEXTURES_BUFFER);
    }
 
    cmd->submit_cmd_bufs = UTIL_DYNARRAY_INIT;
@@ -217,7 +220,11 @@ kk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    vk_command_buffer_reset(&cmd->vk);
    kk_reset_cmd_buffer_internal(cmd);
    cmd->submitted = false;
-   cmd->one_time_submit = false;
+   cmd->skip_enqueue = false;
+   cmd->pass_count = 0;
+   cmd->impure = false;
+   cmd->merge_replay = false;
+   cmd->pass_suspended = false;
 }
 
 const struct vk_command_buffer_ops kk_cmd_buffer_ops = {
@@ -234,8 +241,6 @@ kk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
 
    kk_reset_cmd_buffer(&cmd->vk, 0u);
    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
-   cmd->one_time_submit =
-      pBeginInfo->flags & VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
    return VK_SUCCESS;
 }
@@ -245,9 +250,14 @@ kk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
+   if (cmd->pass_suspended)
+      kk_end_rendering_now(cmd);
    /* Call twice since post_gfx will be moved to pre_gfx but not ended. */
    cs_end(cmd);
    cs_end(cmd);
+   /* Recording-local upload buffers are independent of the shared snapshots. */
+   if (cmd->alloc_set)
+      mtl_residency_set_commit(cmd->alloc_set->recording_residency);
 
    return vk_command_buffer_end(&cmd->vk);
 }
@@ -306,6 +316,8 @@ cs_start_render(struct kk_cmd_buffer *cmd)
 
    cmd->gfx.cmd_buf = mtl_new_command_buffer(dev->mtl_handle);
    mtl_begin_command_buffer(cmd->gfx.cmd_buf, cmd->gfx.allocator);
+   mtl_command_buffer_use_residency_set(cmd->gfx.cmd_buf,
+                                       cmd->alloc_set->recording_residency);
    cmd->gfx.encoder = mtl_new_render_command_encoder_with_descriptor(
       cmd->gfx.cmd_buf, state->render_pass_descriptor);
 
@@ -353,9 +365,13 @@ static void
 kk_start_compute_encoder(struct kk_cmd_buffer *cmd, bool pre_gfx)
 {
    struct kk_encoder_state *es = pre_gfx ? cmd->pre_gfx : cmd->post_gfx;
+   /* Compute/blit work needs its own encoder: not a pure single pass. */
+   cmd->impure = true;
 
    es->cmd_buf = mtl_new_command_buffer(kk_cmd_buffer_device(cmd)->mtl_handle);
    mtl_begin_command_buffer(es->cmd_buf, es->allocator);
+   mtl_command_buffer_use_residency_set(es->cmd_buf,
+                                       cmd->alloc_set->recording_residency);
    es->encoder = mtl_new_compute_command_encoder(es->cmd_buf);
 
    /* Argument table won't ever change */
@@ -401,6 +417,18 @@ kk_stop_encoder(struct kk_cmd_buffer *cmd, struct kk_encoder_state *es)
    }
 
    util_dynarray_clear(&es->ts_resolves);
+
+   /* All resources referenced by this encoder have now been recorded. Capture
+    * device membership before ending the Metal command buffer; later changes
+    * create a new snapshot rather than modifying this one. */
+   mtl_residency_set *snapshot =
+      kk_device_acquire_residency_snapshot(kk_cmd_buffer_device(cmd));
+   if (snapshot) {
+      mtl_command_buffer_use_residency_set(es->cmd_buf, snapshot);
+      util_dynarray_append(&cmd->alloc_set->residency_snapshots, snapshot);
+   } else {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+   }
 
    mtl_end_command_buffer(es->cmd_buf);
 
@@ -524,6 +552,7 @@ kk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
           kk_barrier_requires_encoder_split(cmd, pDependencyInfo)) {
          kk_apply_attachment_store_ops(cmd, true);
          cs_end(cmd);
+         cmd->impure = true;
          cs_start_render(cmd);
       } else
          mtl_barrier_after_encoder_stages(cmd->gfx.encoder, MTL_STAGE_VERTEX,
@@ -725,6 +754,10 @@ kk_cmd_buffer_alloc_bo(struct kk_cmd_buffer *cmd, struct kk_cmd_bo **bo_out)
       return result;
 
    list_addtail(&(*bo_out)->link, &cmd->uploader.bos);
+   mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                    (*bo_out)->bo->mtl_handle);
+   mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                    (*bo_out)->bo->map);
    return VK_SUCCESS;
 }
 
@@ -733,6 +766,10 @@ kk_pool_alloc(struct kk_cmd_buffer *cmd, uint32_t size_B, uint32_t alignment_B)
 {
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    struct kk_uploader *uploader = &cmd->uploader;
+
+   kk_cmd_ensure_alloc_set(cmd);
+   if (!cmd->alloc_set)
+      return (struct kk_ptr){0};
 
    /* Specially handle large allocations owned by the command buffer, e.g. used
     * for statically allocated vertex output buffers with geometry shaders.
@@ -746,6 +783,10 @@ kk_pool_alloc(struct kk_cmd_buffer *cmd, uint32_t size_B, uint32_t alignment_B)
          return (struct kk_ptr){0};
       }
       util_dynarray_append(&cmd->large_bos, buffer);
+      mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                       buffer->mtl_handle);
+      mtl_residency_set_add_allocation(cmd->alloc_set->recording_residency,
+                                       buffer->map);
 
       return (struct kk_ptr){
          .gpu = buffer->gpu,

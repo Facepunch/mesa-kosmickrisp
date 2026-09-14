@@ -11,7 +11,7 @@
 #include "kk_query.h"
 
 static inline global uint64_t *
-query_report(global uint64_t *results, global uint16_t *oq_index,
+query_report(global uint64_t *results, global uint32_t *oq_index,
              uint reports_per_query, uint query)
 {
    /* For occlusion queries, results[] points to the device global heap. We
@@ -28,7 +28,7 @@ query_report(global uint64_t *results, global uint16_t *oq_index,
  */
 KERNEL(1)
 libkk_reset_query(global uint32_t *availability, global uint64_t *results,
-                  global uint16_t *oq_index, uint32_t first_query,
+                  global uint32_t *oq_index, uint32_t first_query,
                   uint16_t reports_per_query, int set_available)
 {
    uint32_t query = first_query + cl_global_id.x;
@@ -64,7 +64,7 @@ libkk_write_u32(global uint32_t *address, uint32_t value)
 
 KERNEL(1)
 libkk_copy_queries(global uint32_t *availability, global uint64_t *results,
-                   global uint16_t *oq_index, uint64_t dst_addr,
+                   global uint32_t *oq_index, uint64_t dst_addr,
                    uint64_t dst_stride, uint32_t first_query,
                    VkQueryResultFlagBits flags, uint16_t reports_per_query)
 {

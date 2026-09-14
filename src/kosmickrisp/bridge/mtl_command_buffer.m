@@ -69,3 +69,13 @@ mtl_command_buffer_set_label(mtl_command_buffer *command_buffer,
       cb.label = @(label);
    }
 }
+
+void
+mtl_command_buffer_use_residency_set(mtl_command_buffer *command_buffer,
+                                    mtl_residency_set *residency_set)
+{
+   @autoreleasepool {
+      id<MTL4CommandBuffer> cb = (id<MTL4CommandBuffer>)command_buffer;
+      [cb useResidencySet:(id<MTLResidencySet>)residency_set];
+   }
+}

@@ -171,7 +171,7 @@ struct kk_graphics_state {
       /* If enabled, index of the current occlusion query in the occlusion heap.
        * There can only be one active at a time (hardware constraint).
        */
-      uint16_t index;
+      uint32_t index;
    } occlusion;
 
    /* Index buffer */
@@ -283,12 +283,27 @@ struct kk_cmd_buffer {
 
    /* Does the command buffer use the geometry heap? */
    bool uses_heap;
-   /* Set at vkBeginCommandBuffer. One-time-submit buffers skip command
-    * enqueueing in the trampolines since they can never be replayed. */
-   bool one_time_submit;
+   /* Commands are always enqueued (vk_cmd_queue) so a submit can replay them;
+    * driver-internal recordings (re-records, pass merges) skip that. */
+   bool skip_enqueue;
    /* Metal command buffers are single-shot: a resubmission must re-record
     * by replaying the enqueued commands (see rerecord_cmd_buffer). */
    bool submitted;
+
+   /* Render pass merging (kk_queue.c). The engine records one render pass
+    * per command buffer and submits ~10 at a time; consecutive passes on the
+    * same attachments with LOAD ops are replayed into one Metal encoder at
+    * submit, saving the tile store/load and the encoder gap per boundary.
+    * A recording is a merge candidate when it contains exactly one
+    * vkCmdBeginRendering and nothing that needs another encoder. */
+   uint8_t pass_count;
+   bool impure;
+   /* Snapshot of the single pass right after vkCmdBeginRendering. */
+   struct kk_rendering_state pass;
+   /* Set on the recording that replays a merge run: vkCmdEndRendering only
+    * suspends the encoder, the next compatible vkCmdBeginRendering resumes. */
+   bool merge_replay;
+   bool pass_suspended;
 };
 
 VK_DEFINE_HANDLE_CASTS(kk_cmd_buffer, vk.base, VkCommandBuffer,
@@ -327,6 +342,11 @@ void cs_start_render(struct kk_cmd_buffer *cmd);
 mtl_render_encoder *cs_get_render(struct kk_cmd_buffer *cmd);
 mtl_compute_encoder *cs_get_compute(struct kk_cmd_buffer *cmd, bool pre_gfx);
 void cs_end(struct kk_cmd_buffer *cmd);
+/* Real vkCmdEndRendering work; the entry point defers it on a merge replay. */
+void kk_end_rendering_now(struct kk_cmd_buffer *cmd);
+/* Whether a pass with state `next` can run in the encoder of `prev`. */
+bool kk_pass_can_continue(const struct kk_rendering_state *prev,
+                          const struct kk_rendering_state *next);
 void kk_cmd_bind_root_to_argument_table(struct kk_cmd_buffer *cmd,
                                         uint64_t addr);
 

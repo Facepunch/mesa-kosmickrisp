@@ -185,6 +185,20 @@ write_storage_image_view_desc(struct kk_descriptor_set *set,
    get_storage_image_view_desc(binding_layout, info, dst, dst_size);
 }
 
+/* Uniform buffer bounds are checked at robustUniformBufferAccessSizeAlignment
+ * (KK_MIN_UBO_ALIGNMENT) granularity; rounding the range up lets the compiler
+ * merge scalar UBO loads into 16-byte vectors under one check. The padding is
+ * always mapped: buffer memory is padded to the same alignment. */
+static uint32_t
+kk_buffer_desc_size(VkDescriptorType type, uint64_t range)
+{
+   assert(range <= UINT32_MAX);
+   if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
+       type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)
+      return align(range, KK_MIN_UBO_ALIGNMENT);
+   return range;
+}
+
 static void
 write_buffer_desc(struct kk_descriptor_set *set,
                   const VkDescriptorBufferInfo *const info, uint32_t binding,
@@ -194,11 +208,11 @@ write_buffer_desc(struct kk_descriptor_set *set,
 
    const struct kk_addr_range addr_range =
       kk_buffer_addr_range(buffer, info->offset, info->range);
-   assert(addr_range.range <= UINT32_MAX);
 
    const struct kk_buffer_address desc = {
       .base_addr = addr_range.addr,
-      .size = addr_range.range,
+      .size = kk_buffer_desc_size(set->layout->binding[binding].type,
+                                  addr_range.range),
    };
    write_desc(set, binding, elem, &desc, sizeof(desc));
 }
@@ -214,13 +228,12 @@ write_dynamic_buffer_desc(struct kk_descriptor_set *set,
 
    const struct kk_addr_range addr_range =
       kk_buffer_addr_range(buffer, info->offset, info->range);
-   assert(addr_range.range <= UINT32_MAX);
 
    struct kk_buffer_address *desc =
       &set->dynamic_buffers[binding_layout->dynamic_buffer_index + elem];
    *desc = (struct kk_buffer_address){
       .base_addr = addr_range.addr,
-      .size = addr_range.range,
+      .size = kk_buffer_desc_size(binding_layout->type, addr_range.range),
    };
 }
 

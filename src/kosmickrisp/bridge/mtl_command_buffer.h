@@ -16,6 +16,8 @@ void mtl_command_allocator_reset(mtl_command_allocator *allocator);
 void mtl_begin_command_buffer(mtl_command_buffer *command_buffer,
                               mtl_command_allocator *allocator);
 void mtl_end_command_buffer(mtl_command_buffer *command_buffer);
+void mtl_command_buffer_use_residency_set(mtl_command_buffer *command_buffer,
+                                         mtl_residency_set *residency_set);
 
 void mtl_command_resolve_counter_heap(mtl_command_buffer *command_buffer,
                                       mtl_counter_heap *heap,

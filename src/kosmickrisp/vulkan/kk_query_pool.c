@@ -23,10 +23,10 @@ struct kk_query_report {
    uint64_t value;
 };
 
-uint16_t *
+uint32_t *
 kk_pool_index_ptr(const struct kk_query_pool *pool)
 {
-   return (uint16_t *)((uint8_t *)pool->bo->cpu + pool->index_start);
+   return (uint32_t *)((uint8_t *)pool->bo->cpu + pool->index_start);
 }
 
 static uint32_t
@@ -74,7 +74,7 @@ kk_query_report_addr(struct kk_device *dev, struct kk_query_pool *pool,
    struct kk_bo *bo =
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
+   uint32_t *remap_index = kk_pool_index_ptr(pool);
    return bo->gpu + pool->query_start + (remap_index[query] * sizeof(uint64_t));
 }
 
@@ -93,7 +93,7 @@ kk_query_report_map(struct kk_device *dev, struct kk_query_pool *pool,
       kk_pool_is_oq(pool) ? dev->occlusion_queries.bo : pool->bo;
 
    uint64_t *queries = (uint64_t *)(bo->cpu + pool->query_start);
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
+   uint32_t *remap_index = kk_pool_index_ptr(pool);
 
    return (struct kk_query_report *)&queries[remap_index[query]];
 }
@@ -138,7 +138,7 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    pool->index_start = align(pool->vk.query_count * sizeof(uint32_t),
                              sizeof(struct kk_query_report));
    uint32_t bo_size =
-      align(pool->index_start + sizeof(uint16_t) * pool->vk.query_count,
+      align(pool->index_start + sizeof(uint32_t) * pool->vk.query_count,
             sizeof(struct kk_query_report));
 
    uint32_t reports_per_query = kk_reports_per_query(pool);
@@ -158,7 +158,7 @@ kk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
       return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
+   uint32_t *remap_index = kk_pool_index_ptr(pool);
    if (kk_pool_is_oq(pool)) {
 
       for (unsigned i = 0; i < pool->vk.query_count; ++i) {
@@ -213,7 +213,7 @@ kk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
       return;
 
    if (kk_pool_is_oq(pool)) {
-      uint16_t *remap_index = kk_pool_index_ptr(pool);
+      uint32_t *remap_index = kk_pool_index_ptr(pool);
       for (unsigned i = 0; i < pool->oq.queries; ++i) {
          kk_query_table_remove(dev, &dev->occlusion_queries, remap_index[i]);
       }
@@ -273,6 +273,7 @@ kk_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
                      uint32_t firstQuery, uint32_t queryCount)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->impure = true;
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
 
    assert(cmd->gfx.encoder == NULL);
@@ -338,6 +339,7 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
                       uint32_t query)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->impure = true;
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
    assert(kk_pool_is_ts(pool) && pool->ts.heap);
@@ -369,7 +371,7 @@ kk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
       util_dynarray_foreach(&pool->ts.stage_map, struct kk_ts_stage_entry,
                             entry) {
          if (entry->stage == mtl_stage && entry->pass == cmd->gfx.encoder) {
-            uint16_t *remap_index = kk_pool_index_ptr(pool);
+            uint32_t *remap_index = kk_pool_index_ptr(pool);
             remap_index[query] = entry->index;
             return;
          }
@@ -411,12 +413,13 @@ kk_CmdBeginQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
                  uint32_t query, VkQueryControlFlags flags)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->impure = true;
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
    cmd->state.gfx.occlusion.mode = flags & VK_QUERY_CONTROL_PRECISE_BIT
                                       ? MTL_VISIBILITY_RESULT_MODE_COUNTING
                                       : MTL_VISIBILITY_RESULT_MODE_BOOLEAN;
    cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
-   uint16_t *remap_index = kk_pool_index_ptr(pool);
+   uint32_t *remap_index = kk_pool_index_ptr(pool);
    cmd->state.gfx.occlusion.index = remap_index[query];
 }
 
@@ -425,6 +428,7 @@ kk_CmdEndQuery(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
                uint32_t query)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->impure = true;
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
    cmd->state.gfx.occlusion.mode = MTL_VISIBILITY_RESULT_MODE_DISABLED;
    cmd->state.gfx.dirty |= KK_DIRTY_OCCLUSION;
@@ -545,6 +549,7 @@ kk_CmdCopyQueryPoolResultsToMemoryKHR(
    VkAddressCommandFlagsKHR dstFlags, VkQueryResultFlags flags)
 {
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
+   cmd->impure = true;
    VK_FROM_HANDLE(kk_query_pool, pool, queryPool);
    struct kk_device *dev = kk_cmd_buffer_device(cmd);
 

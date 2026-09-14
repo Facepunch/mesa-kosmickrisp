@@ -7,11 +7,13 @@
 
 #include "kk_device.h"
 
+#include "kk_bo.h"
 #include "kk_buffer.h"
 #include "kk_buffer_view.h"
 #include "kk_cmd_buffer.h"
 #include "kk_entrypoints.h"
 #include "kk_image.h"
+#include "kk_image_layout.h"
 #include "kk_image_view.h"
 #include "kk_instance.h"
 #include "kk_physical_device.h"
@@ -151,6 +153,112 @@ kk_destroy_sampler_heap(struct kk_device *dev, struct kk_sampler_heap *h)
    kk_query_table_finish(dev, &h->table);
    ralloc_free(h->ht);
    simple_mtx_destroy(&h->lock);
+}
+
+static bool
+kk_null_tex_exists(enum kk_null_tex_type type, enum kk_null_tex_shape shape)
+{
+   /* No depth3d / depth texture_buffer in MSL */
+   return type != KK_NULL_TEX_DEPTH ||
+          (shape != KK_NULL_TEX_3D && shape != KK_NULL_TEX_BUF);
+}
+
+static void
+kk_destroy_null_textures(struct kk_device *dev, struct kk_null_textures *nt)
+{
+   for (unsigned i = 0; i < KK_NULL_TEX_COUNT; i++)
+      mtl_release(nt->textures[i]);
+   if (nt->bo)
+      kk_destroy_bo(dev, nt->bo);
+}
+
+static VkResult
+kk_init_null_textures(struct kk_device *dev, struct kk_null_textures *nt)
+{
+   static const struct {
+      enum mtl_texture_type type;
+      uint8_t samples;
+   } shapes[KK_NULL_TEX_SHAPES] = {
+      [KK_NULL_TEX_2D] = {MTL_TEXTURE_TYPE_2D, 1},
+      [KK_NULL_TEX_2D_ARRAY] = {MTL_TEXTURE_TYPE_2D_ARRAY, 1},
+      [KK_NULL_TEX_3D] = {MTL_TEXTURE_TYPE_3D, 1},
+      [KK_NULL_TEX_CUBE] = {MTL_TEXTURE_TYPE_CUBE, 1},
+      [KK_NULL_TEX_CUBE_ARRAY] = {MTL_TEXTURE_TYPE_CUBE_ARRAY, 1},
+      [KK_NULL_TEX_MS] = {MTL_TEXTURE_TYPE_2D_MULTISAMPLE, 4},
+      [KK_NULL_TEX_MS_ARRAY] = {MTL_TEXTURE_TYPE_2D_ARRAY_MULTISAMPLE, 4},
+      [KK_NULL_TEX_BUF] = {MTL_TEXTURE_TYPE_TEXTURE_BUFFER, 1},
+   };
+   static const enum mtl_pixel_format formats[KK_NULL_TEX_TYPES] = {
+      [KK_NULL_TEX_FLOAT] = MTL_PIXEL_FORMAT_R32_FLOAT,
+      [KK_NULL_TEX_INT] = MTL_PIXEL_FORMAT_R32_SINT,
+      [KK_NULL_TEX_UINT] = MTL_PIXEL_FORMAT_R32_UINT,
+      [KK_NULL_TEX_DEPTH] = MTL_PIXEL_FORMAT_Z32_FLOAT,
+   };
+
+   struct kk_image_layout layouts[KK_NULL_TEX_COUNT];
+   uint64_t tex_size = 16, tex_align = 16;
+   for (unsigned t = 0; t < KK_NULL_TEX_TYPES; t++) {
+      if (kk_null_tex_exists(t, KK_NULL_TEX_BUF))
+         tex_align = MAX2(tex_align,
+                          mtl_minimum_linear_texture_alignment_for_pixel_format(
+                             dev->mtl_handle, formats[t]));
+      for (unsigned s = 0; s < KK_NULL_TEX_SHAPES; s++) {
+         if (!kk_null_tex_exists(t, s))
+            continue;
+         struct kk_image_layout *l = &layouts[kk_null_tex_index(t, s)];
+         *l = (struct kk_image_layout){
+            .width_px = 1,
+            .height_px = 1,
+            .depth_px = 1,
+            .layers = 1,
+            .type = shapes[s].type,
+            .sample_count_sa = shapes[s].samples,
+            .levels = 1,
+            .linear = s == KK_NULL_TEX_BUF,
+            .optimized_layout = s != KK_NULL_TEX_BUF,
+            .usage = MTL_TEXTURE_USAGE_SHADER_READ,
+            .format.mtl = formats[t],
+            .linear_stride_B = s == KK_NULL_TEX_BUF ? 16 : 0,
+         };
+         if (!l->linear) {
+            uint64_t size, align;
+            mtl_heap_texture_size_and_align_with_descriptor(dev->mtl_handle, l,
+                                                            &size, &align);
+            tex_size = MAX2(tex_size, size);
+            tex_align = MAX2(tex_align, align);
+         }
+      }
+   }
+
+   /* Handle table first, then one aliased region for every stand-in. */
+   const uint64_t tex_off =
+      align64(KK_NULL_TEX_COUNT * sizeof(uint64_t), tex_align);
+   VkResult result =
+      kk_alloc_bo(dev, &dev->vk.base, tex_off + tex_size, tex_align, &nt->bo);
+   if (result != VK_SUCCESS)
+      return result;
+
+   uint64_t *handles = nt->bo->cpu;
+   memset(handles, 0, KK_NULL_TEX_COUNT * sizeof(uint64_t));
+   for (unsigned t = 0; t < KK_NULL_TEX_TYPES; t++) {
+      for (unsigned s = 0; s < KK_NULL_TEX_SHAPES; s++) {
+         if (!kk_null_tex_exists(t, s))
+            continue;
+         unsigned i = kk_null_tex_index(t, s);
+         nt->textures[i] = layouts[i].linear
+                              ? mtl_new_texture_with_descriptor_linear(
+                                   nt->bo->map, &layouts[i], tex_off)
+                              : mtl_new_texture_with_descriptor(
+                                   nt->bo->mtl_handle, &layouts[i], tex_off);
+         if (!nt->textures[i]) {
+            kk_destroy_null_textures(dev, nt);
+            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "null stand-in texture %u failed", i);
+         }
+         handles[i] = mtl_texture_get_gpu_resource_id(nt->textures[i]);
+      }
+   }
+   return VK_SUCCESS;
 }
 
 static VkResult
@@ -330,9 +438,13 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_query_table;
 
-   result = kk_device_init_lib(dev);
+   result = kk_init_null_textures(dev, &dev->null_textures);
    if (result != VK_SUCCESS)
       goto fail_sampler_heap;
+
+   result = kk_device_init_lib(dev);
+   if (result != VK_SUCCESS)
+      goto fail_null_textures;
 
    if (pdev->settings.gpu_capture_enabled) {
       const char *capture_directory =
@@ -344,6 +456,8 @@ kk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    return VK_SUCCESS;
 
+fail_null_textures:
+   kk_destroy_null_textures(dev, &dev->null_textures);
 fail_sampler_heap:
    kk_destroy_sampler_heap(dev, &dev->samplers);
 fail_query_table:
@@ -356,6 +470,7 @@ fail_mem_cache:
       dev->has_queue = false;
    }
 fail_vab_memory:
+   mtl_release(dev->residency_set.snapshot);
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
 fail_compiler:
@@ -387,6 +502,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    kk_device_finish_lib(dev);
    kk_query_table_finish(dev, &dev->occlusion_queries);
    kk_destroy_sampler_heap(dev, &dev->samplers);
+   kk_destroy_null_textures(dev, &dev->null_textures);
 
    /* Geometry heap */
    if (dev->heap)
@@ -407,6 +523,7 @@ kk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    simple_mtx_destroy(&dev->alloc_sets.mutex);
 
    /* Release the residency set last once all BOs are released. */
+   mtl_release(dev->residency_set.snapshot);
    mtl_release(dev->residency_set.handle);
    simple_mtx_destroy(&dev->residency_set.mutex);
 
@@ -454,7 +571,7 @@ kk_device_acquire_alloc_set(struct kk_device *dev)
    }
    simple_mtx_unlock(&dev->alloc_sets.mutex);
    if (set)
-      return set;
+      goto init_residency;
 
    set = calloc(1, sizeof(*set));
    if (!set)
@@ -469,6 +586,15 @@ kk_device_acquire_alloc_set(struct kk_device *dev)
          return NULL;
       }
    }
+init_residency:
+   set->recording_residency = mtl_new_residency_set(dev->mtl_handle);
+   if (!set->recording_residency) {
+      for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
+         mtl_release(set->allocators[i]);
+      free(set);
+      return NULL;
+   }
+   set->residency_snapshots = UTIL_DYNARRAY_INIT;
    return set;
 }
 
@@ -476,6 +602,11 @@ void
 kk_device_recycle_alloc_set(struct kk_alloc_set *set)
 {
    struct kk_device *dev = set->dev;
+   mtl_release(set->recording_residency);
+   set->recording_residency = NULL;
+   util_dynarray_foreach(&set->residency_snapshots, mtl_residency_set *, snapshot)
+      mtl_release(*snapshot);
+   util_dynarray_fini(&set->residency_snapshots);
    if (set->cmd_bufs_used > KK_ALLOC_SET_RECYCLE_CMD_BUFS) {
       for (unsigned i = 0; i < ARRAY_SIZE(set->allocators); i++)
          mtl_release(set->allocators[i]);
@@ -499,11 +630,33 @@ kk_device_recycle_alloc_set(struct kk_alloc_set *set)
    }
 }
 
+/* Each returned reference is owned by a recording through GPU completion.
+ * Never mutate a published snapshot: resource removal must not change residency
+ * for command buffers which are already recorded or executing. */
+mtl_residency_set *
+kk_device_acquire_residency_snapshot(struct kk_device *dev)
+{
+   simple_mtx_lock(&dev->residency_set.mutex);
+   if (!dev->residency_set.snapshot) {
+      mtl_residency_set *snapshot = mtl_new_residency_set(dev->mtl_handle);
+      if (snapshot) {
+         mtl_residency_set_copy_allocations(snapshot, dev->residency_set.handle);
+         mtl_residency_set_commit(snapshot);
+         dev->residency_set.snapshot = snapshot;
+      }
+   }
+   mtl_residency_set *snapshot = mtl_retain(dev->residency_set.snapshot);
+   simple_mtx_unlock(&dev->residency_set.mutex);
+   return snapshot;
+}
+
 void
 kk_device_add_heap_to_residency_set(struct kk_device *dev, mtl_heap *heap)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_add_allocation(dev->residency_set.handle, heap);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
@@ -512,6 +665,8 @@ kk_device_remove_heap_from_residency_set(struct kk_device *dev, mtl_heap *heap)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, heap);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
@@ -520,6 +675,8 @@ kk_device_add_buffer_to_residency_set(struct kk_device *dev, mtl_buffer *buffer)
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_add_allocation(dev->residency_set.handle, buffer);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
@@ -529,6 +686,8 @@ kk_device_remove_buffer_from_residency_set(struct kk_device *dev,
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, buffer);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
@@ -538,6 +697,8 @@ kk_device_add_texture_to_residency_set(struct kk_device *dev,
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_add_allocation(dev->residency_set.handle, texture);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 
@@ -547,6 +708,8 @@ kk_device_remove_texture_from_residency_set(struct kk_device *dev,
 {
    simple_mtx_lock(&dev->residency_set.mutex);
    mtl_residency_set_remove_allocation(dev->residency_set.handle, texture);
+   mtl_release(dev->residency_set.snapshot);
+   dev->residency_set.snapshot = NULL;
    simple_mtx_unlock(&dev->residency_set.mutex);
 }
 

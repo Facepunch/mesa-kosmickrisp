@@ -345,6 +345,13 @@ struct wsi_metal_swapchain {
 
    uint32_t current_image_index;
 
+   /* Fetch each image's CAMetalDrawable at present rather than at acquire.
+    * The layer only has three drawables. Taking one at acquire holds it for
+    * the whole frame on top of the one or two Core Animation still owns, so
+    * the next acquire waits on nextDrawable for the compositor to hand one
+    * back: that wait, not the GPU, paced light scenes. */
+   bool late_drawable;
+
    /* VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR */
    bool opaque_composition;
 
@@ -584,6 +591,19 @@ wsi_metal_swapchain_acquire_next_image(struct wsi_swapchain *wsi_chain,
    clock_gettime(CLOCK_MONOTONIC, &start_time);
    timespec_add(&end_time, &rel_timeout, &start_time);
 
+   if (chain->late_drawable) {
+      /* No drawable yet: wsi_metal_swapchain_prepare_present fetches it at
+       * present, so acquire never waits on Core Animation. */
+      uint32_t i = (chain->current_image_index++) % chain->base.image_count;
+      *image_index = i;
+      uint32_t width = 0u, height = 0u;
+      wsi_metal_layer_size(chain->surface->pLayer, &width, &height);
+      if (width && height &&
+          (width != chain->extent.width || height != chain->extent.height))
+         return VK_SUBOPTIMAL_KHR;
+      return VK_SUCCESS;
+   }
+
    while (1) {
       /* Try to acquire an drawable. Unfortunately we might block for up to 1 second. */
       CAMetalDrawable *drawable = wsi_metal_layer_acquire_drawable(chain->surface->pLayer);
@@ -674,6 +694,35 @@ wsi_metal_present_complete(void *present_info_ptr, uint64_t present_id)
    mtx_unlock(&present_info->mutex);
 
    wsi_metal_release_present_info(present_info);
+}
+
+static VkResult
+wsi_metal_swapchain_prepare_present(struct wsi_swapchain *wsi_chain,
+                                    uint32_t image_index)
+{
+   struct wsi_metal_swapchain *chain =
+      (struct wsi_metal_swapchain *)wsi_chain;
+   assert(image_index < chain->base.image_count);
+   struct wsi_metal_image *image = &chain->images[image_index];
+
+   /* Presented again without an acquire in between: keep the drawable. */
+   if (image->drawable)
+      return VK_SUCCESS;
+
+   /* nextDrawable blocks (up to a second) until the layer has a free one. */
+   CAMetalDrawable *drawable = NULL;
+   for (int attempt = 0; attempt < 5 && !drawable; attempt++)
+      drawable = wsi_metal_layer_acquire_drawable(chain->surface->pLayer);
+   if (!drawable)
+      return VK_ERROR_SURFACE_LOST_KHR;
+
+   image->drawable = drawable;
+   chain->base.wsi->metal.bind_drawable_to_vkimage(image->base.blit.image,
+                                                   image->drawable);
+   /* The blit targets the drawable's texture, so it is re-recorded for
+    * every drawable. */
+   return wsi_cmd_blit_image_to_image(wsi_chain, &wsi_chain->image_info,
+                                      &image->base);
 }
 
 static VkResult
@@ -931,6 +980,11 @@ wsi_metal_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    chain->base.release_images = wsi_metal_swapchain_release_images;
    chain->base.set_present_mode = wsi_metal_swapchain_set_present_mode;
    chain->base.queue_present = wsi_metal_swapchain_queue_present;
+   /* KK_EARLY_DRAWABLE=1 restores the acquire-time drawable fetch. */
+   chain->late_drawable =
+      !wsi_device->sw && getenv("KK_EARLY_DRAWABLE") == NULL;
+   if (chain->late_drawable)
+      chain->base.prepare_present = wsi_metal_swapchain_prepare_present;
    chain->base.wait_for_present = wsi_metal_swapchain_wait_for_present;
    chain->base.wait_for_present2 = wsi_metal_swapchain_wait_for_present;
    chain->base.set_hdr_metadata = wsi_metal_swapchain_set_hdr_metadata;
